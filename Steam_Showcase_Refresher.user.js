@@ -3,10 +3,10 @@
 // @name:uk      Steam Showcase Refresher
 // @name:ru      Steam Showcase Refresher
 // @namespace    alex.nocturne.steam.showcase
-// @version      1.14
-// @description  Install an animated Steam showcase in a few clicks: Artwork Showcase (2 GIFs), My Workshop Showcase (5 strips) or Workshop Showcase (1 GIF).
-// @description:uk  Анімована вітрина в профілі Steam у кілька кліків: вітрина ілюстрацій (2 GIF), вітрина моєї майстерні (5 смуг) або вітрина майстерні (1 GIF).
-// @description:ru  Анимированная витрина в профиле Steam в несколько кликов: витрина иллюстраций (2 GIF), витрина моей мастерской (5 полос) или витрина мастерской (1 GIF).
+// @version      1.15
+// @description  Install an animated Steam showcase in a few clicks: Artwork Showcase (2 GIFs), My Workshop Showcase (5 strips) or Featured Artwork Showcase (1 GIF).
+// @description:uk  Анімована вітрина в профілі Steam у кілька кліків: вітрина ілюстрацій (2 GIF), вітрина моєї майстерні (5 смуг) або вітрина вибраних ілюстрацій (1 GIF).
+// @description:ru  Анимированная витрина в профиле Steam в несколько кликов: витрина иллюстраций (2 GIF), витрина моей мастерской (5 полос) или витрина избранных иллюстраций (1 GIF).
 // @author       Alex Nocturne
 // @copyright    Copyright (c) 2026 Alex Nocturne
 // @license      Free for personal use. Provided AS IS, without warranty of any kind. Resale prohibited.
@@ -19,7 +19,7 @@
 // ==/UserScript==
 
 /*
- * Steam Showcase Refresher 1.14
+ * Steam Showcase Refresher 1.15
  * Copyright (c) 2026 Alex Nocturne.
  *
  * Provided AS IS, free of charge, as a helper for installing artwork.
@@ -29,7 +29,7 @@
  * What it does, step by step (only on steamcommunity.com, only with your Steam session):
  *   1. Opens your showcase editor and lets you pick which showcase to replace:
  *      an Artwork Showcase (2 GIFs: 506 + 100 px), a row of My Workshop Showcase (5 strips, 119 px each)
- *      or a Workshop Showcase (1 GIF).
+ *      or a Featured Artwork Showcase (1 GIF).
  *   2. Uploads the GIFs through Steam's own upload form (Workshop parts as Workshop items).
  *   3. Puts them into the chosen showcase and saves the profile.
  *   4. Optionally (only if you ask, Artwork Showcase only) helps hide or remove old artwork you tick yourself.
@@ -37,7 +37,7 @@
  */
 (() => {
   'use strict';
-  const VERSION = '1.14';
+  const VERSION = '1.15';
   const RELEASE_YEAR = 2026;         // year of this release, shown in the panel footer
   const sw = typeof unsafeWindow === 'undefined' ? window : unsafeWindow;
   const K = 'steamShowcaseRefresher.job.v4';
@@ -61,8 +61,9 @@
     workshop: {kind: 'workshop', type: 12, rowSize: 5,
       name: {en: 'My Workshop Showcase', ru: 'Витрина моей мастерской', uk: 'Вітрина моєї майстерні'}, parts: [1, 2, 3, 4, 5].map(n =>
       ({key: 's' + n, width: null, en: `Strip ${n}`, ru: `Полоса ${n}`, uk: `Смуга ${n}`, short: String(n)}))},
-    single: {kind: 'workshop', type: 11, rowSize: 0,
-      name: {en: 'Workshop Showcase', ru: 'Витрина мастерской', uk: 'Вітрина майстерні'}, parts: [
+    // 1P: one artwork (gallery item, uploaded like 2P) in the Featured Artwork Showcase (type 22, one slot).
+    single: {kind: 'artwork', type: 22, rowSize: 0,
+      name: {en: 'Featured Artwork Showcase', ru: 'Витрина избранных иллюстраций', uk: 'Вітрина вибраних ілюстрацій'}, parts: [
       {key: 'one', width: null, en: 'Artwork GIF (one picture)', ru: 'GIF иллюстрации (одна картинка)', uk: 'GIF ілюстрації (одна картинка)', short: '1P'},
     ]},
   };
@@ -954,17 +955,17 @@
     if (step === 'idle') {
       if (!owner()) h += `<div class="ssr-note ssr-note-bad">${I('Sign in to Steam Community to use this.', 'Войди в Steam Community, чтобы начать.', 'Увійди в Steam Community, щоб почати.')}</div>`;
       const tab = (key, title, sub) => `<button type="button" data-layout="${key}" class="${layout === key ? 'active' : ''}">${title}<small>${sub}</small></button>`;
-      h += `<div class="ssr-tabs">${tab('artwork', I('Artwork 2P', 'Иллюстрации 2P', 'Ілюстрації 2P'), I('2 strips', '2 полосы', '2 смуги'))}${tab('workshop', I('Workshop 5P', 'Мастерская 5P', 'Майстерня 5P'), I('5 strips', '5 полос', '5 смуг'))}${tab('single', I('Workshop 1P', 'Мастерская 1P', 'Майстерня 1P'), I('1 strip', '1 полоса', '1 смуга'))}</div>`;
+      h += `<div class="ssr-tabs">${tab('artwork', I('Artwork 2P', 'Иллюстрации 2P', 'Ілюстрації 2P'), I('2 strips', '2 полосы', '2 смуги'))}${tab('workshop', I('Workshop 5P', 'Мастерская 5P', 'Майстерня 5P'), I('5 strips', '5 полос', '5 смуг'))}${tab('single', I('Artwork 1P', 'Иллюстрации 1P', 'Ілюстрації 1P'), I('1 strip', '1 полоса', '1 смуга'))}</div>`;
       if (layout === 'artwork') {
         h += `<p>${I('Choose the two GIFs from your artwork set — the script uploads them and puts them into your Artwork Showcase. Nothing is deleted.',
                      'Выбери два GIF из комплекта — скрипт загрузит их и поставит в витрину иллюстраций. Ничего не удаляется.', 'Обери два GIF з комплекту — скрипт завантажить їх і поставить у вітрину ілюстрацій. Нічого не видаляється.')}</p>`;
         h += LAYOUTS.artwork.parts.map(fileField).join('');
         h += `<button type="button" class="ssr-link ssr-mgr-link" id="ssr-art-open">${I('Manage my artwork (2P) →', 'Управление моими работами (2P) →', 'Керування моїми роботами (2P) →')}</button>`;
       } else if (layout === 'single') {
-        h += `<p>${I('Choose one GIF — the script uploads it as a Workshop item and puts it into your Workshop Showcase (one large picture). Nothing is deleted.',
-                     'Выбери один GIF — скрипт загрузит его как предмет мастерской и поставит в витрину мастерской (одна большая картинка). Ничего не удаляется.', 'Обери один GIF — скрипт завантажить його як предмет майстерні й поставить у вітрину майстерні (одна велика картинка). Нічого не видаляється.')}</p>`;
+        h += `<p>${I('Choose one GIF — the script uploads it to your artwork and puts it into your Featured Artwork Showcase (one large picture). Nothing is deleted.',
+                     'Выбери один GIF — скрипт загрузит его в твои иллюстрации и поставит в витрину избранных иллюстраций (одна большая картинка). Ничего не удаляется.', 'Обери один GIF — скрипт завантажить його в твої ілюстрації й поставить у вітрину вибраних ілюстрацій (одна велика картинка). Нічого не видаляється.')}</p>`;
         h += LAYOUTS.single.parts.map(fileField).join('');
-        h += `<button type="button" class="ssr-link ssr-mgr-link" id="ssr-mgr-open">${I('Manage my artwork (1P) →', 'Управление моими работами (1P) →', 'Керування моїми роботами (1P) →')}</button>`;
+        h += `<button type="button" class="ssr-link ssr-mgr-link" id="ssr-art-open">${I('Manage my artwork (1P) →', 'Управление моими работами (1P) →', 'Керування моїми роботами (1P) →')}</button>`;
       } else {
         h += `<p>${I('Choose the five strips from your set — the script uploads them as Workshop items and puts them into a row of My Workshop Showcase. Nothing is deleted.',
                      'Выбери пять полос из комплекта — скрипт загрузит их как предметы мастерской и поставит в ряд витрины моей мастерской. Ничего не удаляется.', 'Обери п’ять смуг з комплекту — скрипт завантажить їх як предмети майстерні й поставить у ряд вітрини моєї майстерні. Нічого не видаляється.')}</p>`;
@@ -1036,7 +1037,9 @@
       else {
         const setBox = (items, ref, label, warn) => {
           const on = items.every(x => picks.has(x.id));
-          const inst = items.length === 2 ? `<button type="button" class="ssr-btn ssr-inst" data-inst2="${ref}">${I('Install to showcase', 'Установить в витрину', 'Встановити у вітрину')}</button>` : '';
+          // 2 artworks -> Artwork Showcase (2P); 1 artwork -> Featured Artwork Showcase (1P); other sizes get no button.
+          const inst = items.length === 2 ? `<button type="button" class="ssr-btn ssr-inst" data-inst2="${ref}">${I('Install as 2P', 'Установить как 2P', 'Встановити як 2P')}</button>`
+            : items.length === 1 ? `<button type="button" class="ssr-btn ssr-inst" data-inst1="${ref}">${I('Install as 1P', 'Установить как 1P', 'Встановити як 1P')}</button>` : '';
           return `<label class="ssr-set ${warn ? 'ssr-inuse' : ''} ${on ? 'on' : ''}"><span><input type="checkbox" data-gset="${ref}" ${on ? 'checked' : ''}> ${warn ? '⚠ ' : ''}${safe(label)}${inst}</span>
             <span class="ssr-set-strips ssr-pairrow">${items.map(x => `<a href="${itemURL(x.id)}" target="_blank" rel="noopener" title="ID ${x.id}">${thumbBox(x.good ? x.thumb : '', 'ssr-setthumb', x.good ? '' : x.id)}</a>`).join('')}</span></label>`;
         };
@@ -1120,6 +1123,7 @@
     on('ssr-stop', () => { if (confirm(I('Stop? Artwork already uploaded or deleted on Steam stays as it is.', 'Остановить? Уже загруженное или удалённое в Steam останется как есть.', 'Зупинити? Уже завантажене чи видалене в Steam залишиться як є.'))) finish(); });
     const gsetItems = ref => { const [k, i] = ref.split(':'); const g = groups?.[k]?.[+i]; return Array.isArray(g) ? g : g?.items || []; };
     $$('[data-gset]', ui).forEach(el => el.onchange = () => { gsetItems(el.dataset.gset).forEach(x => el.checked ? picks.add(x.id) : picks.delete(x.id)); render(); });
+    $$('[data-inst1]', ui).forEach(b => b.onclick = e => { e.preventDefault(); e.stopPropagation(); const items = gsetItems(b.dataset.inst1); if (items.length === 1) installExisting('single', [items[0].id]); });
     $$('[data-inst2]', ui).forEach(b => b.onclick = e => { e.preventDefault(); e.stopPropagation(); const items = gsetItems(b.dataset.inst2); if (items.length === 2) installPair(items); });
     on('ssr-g-all', () => { (groups?.free || []).flat().forEach(x => picks.add(x.id)); render(); });
     on('ssr-g-none', () => { picks.clear(); render(); });
@@ -1327,10 +1331,9 @@
       (failed.length ? '\n' + failed.join('\n') : '');
     render();
   }
-  // 5 items -> only My Workshop Showcase (5P); 1 item -> only Workshop Showcase (1P); other sizes get no button.
+  // Workshop items: only sets of 5 -> My Workshop Showcase (5P); other sizes get no button.
   function instButton(ids) {
     if (ids.length === 5) return `<button type="button" class="ssr-btn ssr-inst" data-inst="workshop" data-ids="${ids.join(',')}">${I('Install as 5P', 'Установить как 5P', 'Встановити як 5P')}</button>`;
-    if (ids.length === 1) return `<button type="button" class="ssr-btn ssr-inst" data-inst="single" data-ids="${ids.join(',')}">${I('Install as 1P', 'Установить как 1P', 'Встановити як 1P')}</button>`;
     return '';
   }
   function stripRow(ids, cls = '') {
@@ -1377,7 +1380,7 @@
     on('ssr-mgr-back', () => { mgr = null; render(); });
     on('ssr-mgr-reload', () => openManager());
     on('ssr-mgr-delete', deletePicked);
-    $$('[data-inst]', ui).forEach(b => b.onclick = e => { e.preventDefault(); e.stopPropagation(); installExisting(b.dataset.inst, b.dataset.ids.split(',')); });
+    $$('[data-inst]', ui).forEach(b => b.onclick = e => { e.preventDefault(); e.stopPropagation(); if (b.dataset.inst === 'workshop') installExisting('workshop', b.dataset.ids.split(',')); });
     on('ssr-mgr-all', () => { mgr.sets.flat().forEach(x => mgr.picks.add(x.id)); render(); });
     on('ssr-mgr-none', () => { mgr.picks.clear(); render(); });
     $$('[data-showcase]', ui).forEach(el => el.onchange = () => {
