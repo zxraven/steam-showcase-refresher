@@ -3,10 +3,10 @@
 // @name:uk      Steam Showcase Refresher
 // @name:ru      Steam Showcase Refresher
 // @namespace    alex.nocturne.steam.showcase
-// @version      1.13
-// @description  Install an animated Steam Artwork Showcase (2 GIFs) or Workshop Showcase (5 strips) in a few clicks.
-// @description:uk  Анімована вітрина в профілі Steam у кілька кліків: вітрина ілюстрацій (2 GIF) або вітрина майстерні (5 смуг).
-// @description:ru  Анимированная витрина в профиле Steam в несколько кликов: витрина иллюстраций (2 GIF) или витрина мастерской (5 полос).
+// @version      1.14
+// @description  Install an animated Steam showcase in a few clicks: Artwork Showcase (2 GIFs), My Workshop Showcase (5 strips) or Workshop Showcase (1 GIF).
+// @description:uk  Анімована вітрина в профілі Steam у кілька кліків: вітрина ілюстрацій (2 GIF), вітрина моєї майстерні (5 смуг) або вітрина майстерні (1 GIF).
+// @description:ru  Анимированная витрина в профиле Steam в несколько кликов: витрина иллюстраций (2 GIF), витрина моей мастерской (5 полос) или витрина мастерской (1 GIF).
 // @author       Alex Nocturne
 // @copyright    Copyright (c) 2026 Alex Nocturne
 // @license      Free for personal use. Provided AS IS, without warranty of any kind. Resale prohibited.
@@ -19,7 +19,7 @@
 // ==/UserScript==
 
 /*
- * Steam Showcase Refresher 1.13
+ * Steam Showcase Refresher 1.14
  * Copyright (c) 2026 Alex Nocturne.
  *
  * Provided AS IS, free of charge, as a helper for installing artwork.
@@ -28,15 +28,17 @@
  *
  * What it does, step by step (only on steamcommunity.com, only with your Steam session):
  *   1. Opens your showcase editor and lets you pick which showcase to replace:
- *      an Artwork Showcase (2 GIFs: 506 + 100 px) or a Workshop Showcase (5 strips, 119 px each).
- *   2. Uploads the GIFs through Steam's own upload form (Workshop strips as Workshop items).
+ *      an Artwork Showcase (2 GIFs: 506 + 100 px), a row of My Workshop Showcase (5 strips, 119 px each)
+ *      or a Workshop Showcase (1 GIF).
+ *   2. Uploads the GIFs through Steam's own upload form (Workshop parts as Workshop items).
  *   3. Puts them into the chosen showcase and saves the profile.
  *   4. Optionally (only if you ask, Artwork Showcase only) helps hide or remove old artwork you tick yourself.
  * It never asks for your password, never sends data anywhere except Steam itself.
  */
 (() => {
   'use strict';
-  const VERSION = '1.13';
+  const VERSION = '1.14';
+  const RELEASE_YEAR = 2026;         // year of this release, shown in the panel footer
   const sw = typeof unsafeWindow === 'undefined' ? window : unsafeWindow;
   const K = 'steamShowcaseRefresher.job.v4';
   const LANG_KEY = 'steamShowcaseRefresher.language';
@@ -49,18 +51,27 @@
   const WORKSHOP_APP = 480;            // neutral app id commonly used for long Workshop Showcases
   const STRIP_W = 119;                 // recommended width of one Workshop Showcase strip
   // Supported showcase layouts. type = Steam profile showcase type id.
+  // rowSize: slots per row; a showcase with more slots (e.g. My Workshop Showcase level 2: 10) has several rows.
   const LAYOUTS = {
-    artwork: {kind: 'artwork', type: 13, parts: [
+    artwork: {kind: 'artwork', type: 13, rowSize: 0,
+      name: {en: 'Artwork Showcase', ru: 'Витрина иллюстраций', uk: 'Вітрина ілюстрацій'}, parts: [
       {key: 'main', width: 506, en: 'Main GIF (wide, 506 px)', ru: 'Основной GIF (широкий, 506 px)', uk: 'Основний GIF (широкий, 506 px)', short: 'Main'},
       {key: 'side', width: 100, en: 'Side GIF (narrow, 100 px)', ru: 'Боковой GIF (узкий, 100 px)', uk: 'Бічний GIF (вузький, 100 px)', short: 'Side'},
     ]},
-    workshop: {kind: 'workshop', type: 12, parts: [1, 2, 3, 4, 5].map(n =>
+    workshop: {kind: 'workshop', type: 12, rowSize: 5,
+      name: {en: 'My Workshop Showcase', ru: 'Витрина моей мастерской', uk: 'Вітрина моєї майстерні'}, parts: [1, 2, 3, 4, 5].map(n =>
       ({key: 's' + n, width: null, en: `Strip ${n}`, ru: `Полоса ${n}`, uk: `Смуга ${n}`, short: String(n)}))},
+    single: {kind: 'workshop', type: 11, rowSize: 0,
+      name: {en: 'Workshop Showcase', ru: 'Витрина мастерской', uk: 'Вітрина майстерні'}, parts: [
+      {key: 'one', width: null, en: 'Artwork GIF (one picture)', ru: 'GIF иллюстрации (одна картинка)', uk: 'GIF ілюстрації (одна картинка)', short: '1P'},
+    ]},
   };
   const SHOP = 'https://alexnocturne.blacksea.in.ua';
   const TITLE = '⠀';             // invisible artwork title
-  const HARD_LIMIT = 8 * 1024 * 1024;  // Steam rejects artwork over this size
-  const SOFT_LIMIT = 5 * 1024 * 1024;  // above this Steam sometimes rejects uploads
+  // Steam's form says "under 8 MB", but in practice larger files are rejected (a Workshop upload over 5 MB
+  // lands on the Workshop home page). So 5 MB is a hard limit for every part.
+  const HARD_LIMIT = 5 * 1024 * 1024;
+  const SOFT_LIMIT = HARD_LIMIT;
 
   const savedLang = (() => { try { return localStorage.getItem(LANG_KEY); } catch { return null; } })();
   const LANGS = [['en', 'EN'], ['uk', 'UA'], ['ru', 'RU']];   // panel order: EN | UA | RU
@@ -74,7 +85,8 @@
   const $$ = (q, root = document) => [...root.querySelectorAll(q)];
   const okID = s => /^\d{7,20}$/.test(String(s ?? ''));
   const safe = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const safeURL = u => { try { const x = new URL(u, location.href); return /^https:$/.test(x.protocol) ? x.href : ''; } catch { return ''; } };
+  // An empty value must stay empty: new URL('', location.href) would return the current page's address.
+  const safeURL = u => { if (!String(u ?? '').trim()) return ''; try { const x = new URL(u, location.href); return /^https:$/.test(x.protocol) ? x.href : ''; } catch { return ''; } };
   const itemURL = id => `https://steamcommunity.com/sharedfiles/filedetails/?id=${id}`;
   const isUpload = () => location.pathname.startsWith('/sharedfiles/edititem/767/3');
   const isGallery = () => /\/images\/?$/.test(location.pathname);
@@ -104,7 +116,8 @@
   const nextPart = j => partKeys(j).findIndex(k => !okID(j?.ids?.[k]));
   const listURL = j => L(j).kind === 'workshop' ? WORKSHOP_LIST : GALLERY;
   const onList = j => L(j).kind === 'workshop' ? isWorkshopList() : isGallery();
-  const showcaseName = j => L(j).kind === 'workshop' ? I('Workshop Showcase', 'Витрина мастерской', 'Вітрина майстерні') : I('Artwork Showcase', 'Витрина иллюстраций', 'Вітрина ілюстрацій');
+  const showcaseName = j => { const n = L(j).name; return I(n.en, n.ru, n.uk); };
+  const rowName = n => I(`row ${n}`, `ряд ${n}`, `ряд ${n}`);
 
   // ---------- real thumbnails ----------
   // Gallery tiles of long artwork often look like 1-px strips, so the picture is taken
@@ -180,7 +193,7 @@
   // ---------- GIF validation ----------
   async function checkGif(file, width) {
     if (!file) throw Error(I('Choose a GIF file.', 'Выбери GIF-файл.', 'Обери GIF-файл.'));
-    if (file.size > HARD_LIMIT) throw Error(I(`${mb(file.size)} — Steam accepts files up to 8 MB.`, `${mb(file.size)} — Steam принимает файлы до 8 МБ.`, `${mb(file.size)} — Steam приймає файли до 8 МБ.`));
+    if (file.size > HARD_LIMIT) throw Error(I(`${mb(file.size)}: too large. Each GIF must be 5 MB or less, Steam rejects bigger uploads.`, `${mb(file.size)}: слишком большой. Каждый GIF должен быть не больше 5 МБ, большие файлы Steam отклоняет.`, `${mb(file.size)}: завеликий. Кожен GIF має бути не більше 5 МБ, більші файли Steam відхиляє.`));
     if (file.size < 16) throw Error(I('The file is empty or damaged.', 'Файл пустой или повреждён.', 'Файл порожній або пошкоджений.'));
     const head = new Uint8Array(await file.slice(0, 10).arrayBuffer());
     const magic = String.fromCharCode(...head.slice(0, 6));
@@ -301,8 +314,22 @@
     }
     return {slots, thumbs};
   }
-  // Current item IDs in the target showcase, one per slot of the job's layout.
-  const targetSlots = (j, target) => { const s = slotsOf(L(j).type, target.purchase).slots; return partKeys(j).map((_, i) => s[i] || ''); };
+  // Number of slots the editor draws for a showcase (open slots have no data-slotjson).
+  function slotCount(type, purchase) {
+    const root = findPreview(type, purchase);
+    return root ? root.querySelectorAll('.showcase_slot').length : 0;
+  }
+  // Rows of a showcase for the job's layout: My Workshop Showcase level 2 has 10 slots = 2 rows of 5.
+  function rowsOf(j, purchase) {
+    const size = L(j).rowSize;
+    if (!size) return 1;
+    return Math.max(1, Math.floor(slotCount(L(j).type, purchase) / size));
+  }
+  // Current item IDs in the target showcase, one per slot of the job's layout (from the chosen row).
+  const targetSlots = (j, target) => {
+    const s = slotsOf(L(j).type, target.purchase).slots, off = Number(j?.target?.offset) || 0;
+    return partKeys(j).map((_, i) => s[off + i] || '');
+  };
   // Every item ID used by any showcase on the profile, with a human label and thumbnail.
   function usedArtwork(excludeKey = null) {
     const map = {};
@@ -365,13 +392,30 @@
   }
   function readShowcaseLevel(type, target) {
     const root = findPreview(type, target.purchase);
+    const opt = target.select?.selectedOptions?.[0];
+    const fromTitle = ((opt?.getAttribute('title') || opt?.textContent || '').match(/\[[^\]\d]*(\d{1,2})\s*\]/) || [])[1];
     const level = root?.dataset.eshowcaselevel || root?.dataset.level ||
-      target.select?.closest('[data-eshowcaselevel]')?.dataset.eshowcaselevel || '1';
+      target.select?.closest('[data-eshowcaselevel]')?.dataset.eshowcaselevel || fromTitle || '1';
     return /^\d+$/.test(String(level)) && Number(level) > 0 ? Number(level) : 1;
   }
   const editorReady = () => !!($('#showcases') || selectsAll().length || $('[data-eshowcasetype], [id^="showcase_preview_"]'));
 
-  // ---------- Step 1: choose which showcase to replace ----------
+  // ---------- Step 1: choose which showcase (and which row) to replace ----------
+  // One choice per showcase row: key "<purchase>:<row>", offset = first slot of the row.
+  function choicesFor(j) {
+    const type = L(j).type, n = partKeys(j).length, out = [];
+    for (const s of showcasesOfType(type)) {
+      const {slots, thumbs} = slotsOf(type, s.purchase);
+      const rows = rowsOf(j, s.purchase);
+      for (let r = 0; r < rows; r++) {
+        const off = r * n;
+        out.push({key: `${s.purchase}:${r}`, purchase: s.purchase, index: s.index, name: s.name, position: s.position,
+          row: r + 1, rows, offset: off,
+          slots: Array.from({length: n}, (_, i) => slots[off + i] || ''), thumbs: Array.from({length: n}, (_, i) => thumbs[off + i] || '')});
+      }
+    }
+    return out;
+  }
   async function pickShowcase(j) {
     j = state() || j;
     if (!isEdit() || working) return;
@@ -379,14 +423,8 @@
     try {
       await waitFor(editorReady, 12000);
       await sleep(600);
-      const type = L(j).type, n = partKeys(j).length;
-      const list = showcasesOfType(type);
-      showcaseChoices = list.map(s => {
-        const {slots, thumbs} = slotsOf(type, s.purchase);
-        return {key: s.purchase, purchase: s.purchase, index: s.index, name: s.name, position: s.position,
-          slots: Array.from({length: n}, (_, i) => slots[i] || ''), thumbs: Array.from({length: n}, (_, i) => thumbs[i] || '')};
-      });
-      log('Showcases found', type, showcaseChoices);
+      showcaseChoices = choicesFor(j);
+      log('Showcases found', L(j).type, showcaseChoices);
       const knownIDs = Object.keys(usedArtwork());
       if (!j.knownIDs) { j = {...j, knownIDs}; store(j); }
       if (showcaseChoices.length === 1) { working = false; return chooseShowcase(showcaseChoices[0].key); }
@@ -405,7 +443,7 @@
   function chooseShowcase(key) {
     const j = state(); if (!j) return;
     const c = showcaseChoices.find(x => x.key === key); if (!c) return;
-    const target = {purchase: c.purchase, index: c.index, name: c.name, position: c.position};
+    const target = {purchase: c.purchase, index: c.index, name: c.name, position: c.position, row: c.row, rows: c.rows, offset: c.offset};
     const oldSlots = c.slots.filter(okID);
     const thumbs = {}; c.slots.forEach((id, i) => { if (okID(id) && c.thumbs[i]) thumbs[id] = c.thumbs[i]; });
     const uploaded = allUploaded(j);
@@ -556,27 +594,30 @@
       if (j.target && !list.some(s => s.purchase === j.target.purchase) && list.length !== 1) { j = {...j, target: null}; store(j); }
       if (!j.target) {
         if (!list.length) { store({...j, phase: 'need-showcase'}); return; }
-        if (list.length > 1) { working = false; store({...j, phase: 'pick-showcase'}); await pickShowcase(state()); return; }
-        const s = list[0];
-        j = {...j, target: {purchase: s.purchase, index: s.index, name: s.name, position: 1},
-          oldSlots: targetSlots(j, s).filter(okID)};
+        const choices = choicesFor(j);
+        if (choices.length !== 1) { working = false; store({...j, phase: 'pick-showcase'}); await pickShowcase(state()); return; }
+        const c = choices[0];
+        j = {...j, target: {purchase: c.purchase, index: c.index, name: c.name, position: 1, row: 1, rows: 1, offset: 0},
+          oldSlots: c.slots.filter(okID)};
         store(j);
       }
       const target = list.find(s => s.purchase === j.target.purchase) || (list.length === 1 ? list[0] : null);
       if (!target) throw Error(I(`${showcaseName(j)} not found. Your GIFs are uploaded; press Retry.`, `${showcaseName(j)} не найдена. GIF уже загружены; нажми «Повторить».`, `${showcaseName(j)}: не знайдено. GIF уже завантажені; натисни «Повторити».`));
-      const ids = idList(j);
+      const ids = idList(j), off = Number(j.target.offset) || 0;
+      if (off && rowsOf(j, target.purchase) * partKeys(j).length <= off)
+        throw Error(I(`${showcaseName(j)} has no ${rowName(j.target.row)} now. Your GIFs are uploaded; press Retry.`, `В витрине «${showcaseName(j)}» сейчас нет: ${rowName(j.target.row)}. GIF уже загружены; нажми «Повторить».`, `У вітрині «${showcaseName(j)}» зараз немає: ${rowName(j.target.row)}. GIF уже завантажені; натисни «Повторити».`));
       const save = await waitFor(() => { const b = actualSaveButton(target); return b && b.isConnected ? b : null; });
       if (!save) throw Error(I('Steam Save button not found. GIFs are uploaded; nothing was deleted.', 'Не найдена кнопка сохранения Steam. GIF загружены, ничего не удалено.', 'Не знайдено кнопку збереження Steam. GIF завантажені, нічого не видалено.'));
       const nativePreview = sw.PreviewShowcaseConfigWithSlotChange;
       if (typeof nativePreview !== 'function')
         throw Error(I('Steam showcase editor is unavailable (layout changed?). GIFs are uploaded; you can place them manually.', 'Редактор витрин Steam недоступен (изменилась разметка?). GIF загружены, их можно поставить вручную.', 'Редактор вітрин Steam недоступний (змінилася розмітка?). GIF завантажені, їх можна поставити вручну.'));
       const level = readShowcaseLevel(type, target);
-      log('Applying', {type, purchase: target.purchase, level, ids});
+      log('Applying', {type, purchase: target.purchase, level, offset: off, ids});
       for (let slot = 0; slot < ids.length; slot++) {
         if (targetSlots(j, target)[slot] === ids[slot]) continue;
-        await Promise.resolve(nativePreview.call(sw, type, Number(target.purchase), level, slot, {publishedfileid: ids[slot]}));
+        await Promise.resolve(nativePreview.call(sw, type, Number(target.purchase), level, off + slot, {publishedfileid: ids[slot]}));
         if (!await waitFor(() => targetSlots(j, target)[slot] === ids[slot], 16000))
-          throw Error(I(`Steam did not accept item ${ids[slot]} in slot ${slot + 1}; nothing was saved.`, `Steam не принял работу ${ids[slot]} в место ${slot + 1}; ничего не сохранено.`, `Steam не прийняв роботу ${ids[slot]} у місце ${slot + 1}; нічого не збережено.`));
+          throw Error(I(`Steam did not accept item ${ids[slot]} in slot ${off + slot + 1}; nothing was saved.`, `Steam не принял работу ${ids[slot]} в место ${off + slot + 1}; ничего не сохранено.`, `Steam не прийняв роботу ${ids[slot]} у місце ${off + slot + 1}; нічого не збережено.`));
       }
       const current = targetSlots(j, target);
       if (current.some((id, i) => id !== ids[i]))
@@ -622,20 +663,55 @@
   }
 
   // ---------- Optional cleanup of old artwork ----------
-  function buildGroups(j) {
+  // Groups for the artwork review screen. Items are shown in sets (a 2P set = Main + Side uploaded together).
+  //   replaced  - were in the replaced showcase (only right after an install), ticked by default
+  //   showcases - stand in a showcase now: can be ticked too, with an extra warning
+  //   free      - not used anywhere
+  // The artwork just installed (idList) is never offered.
+  function buildGroups(j, usage) {
     const protect = new Set(idList(j).filter(okID));
-    const used = j.used || {};
     const old = new Set((j.oldSlots || []).map(String));
-    const g = {replaced: [], free: [], other: []};
+    const byId = new Map();
     for (const n of galleryNodes()) {
       if (protect.has(n.id)) continue;
-      const good = (j.thumbs || {})[n.id] || used[n.id]?.thumb || n.thumb || '';
-      const item = {id: n.id, title: blankTitle(n.title) ? '' : n.title, thumb: good, good: !!good};
-      if (used[n.id]) g.other.push({...item, where: used[n.id].label});
-      else if (old.has(n.id)) g.replaced.push(item);
-      else g.free.push(item);
+      const good = (j.thumbs || {})[n.id] || n.thumb || '';
+      byId.set(n.id, {id: n.id, title: blankTitle(n.title) ? '' : n.title, thumb: good, good: !!good});
     }
-    return g;
+    const taken = new Set();
+    const showcases = [];
+    for (const sc of usage.showcases) {
+      const items = sc.ids.filter(id => byId.has(id) && !taken.has(id)).map(id => byId.get(id));
+      items.forEach(x => taken.add(x.id));
+      if (items.length) showcases.push({label: sc.label, items});
+    }
+    const replacedItems = [...byId.values()].filter(x => old.has(x.id) && !taken.has(x.id));
+    replacedItems.forEach(x => taken.add(x.id));
+    const free = makeSets([...byId.values()].filter(x => !taken.has(x.id)), 2);
+    return {byId, used: usage.used, replaced: replacedItems.length ? [replacedItems] : [], showcases, free};
+  }
+  // Which artwork stands in which showcase, from a fresh copy of the showcase editor (any showcase type).
+  function artworkUsage(d) {
+    const names = {}, counters = {}, used = {}, byKey = {};
+    for (const sel of d.querySelectorAll('select[id^="showcase_"][id$="_select"], select[name="profile_showcase[]"]')) {
+      const opt = sel.querySelector('option[selected]') || sel.selectedOptions?.[0];
+      if (!opt || String(opt.value) === '0') continue;
+      const t = String(opt.value), p = opt.getAttribute('data-purchaseid') || '0';
+      counters[t] = (counters[t] || 0) + 1;
+      names[`${t}_${/^\d+$/.test(p) ? String(BigInt(p)) : p}`] = (opt.getAttribute('title') || opt.textContent || '').trim() + ` №${counters[t]}`;
+    }
+    for (const el of d.querySelectorAll('.showcase_slot[data-slotjson]')) {
+      const root = el.closest('[data-eshowcasetype], [id^="showcase_preview_"]');
+      const type = root?.getAttribute('data-eshowcasetype') || (root?.id.match(/^showcase_preview_(\d+)$/) || [])[1] || '?';
+      const purchase = (root && rootPurchase(root)) || '0';
+      let obj; try { obj = JSON.parse(el.getAttribute('data-slotjson') || '{}'); } catch { continue; }
+      const id = String(obj.publishedfileid || '');
+      if (!okID(id)) continue;
+      const key = `${type}_${purchase}`;
+      const label = names[key] || I('a showcase', 'витрина', 'вітрина');
+      used[id] = label;
+      (byKey[key] = byKey[key] || {label, slots: []}).slots[obj.slot] = id;
+    }
+    return {used, showcases: Object.values(byKey).map(b => ({label: b.label, ids: b.slots.filter(okID)}))};
   }
   async function cleanupScan() {
     if (!isGallery() || working) return;
@@ -651,11 +727,12 @@
         else store({...j, phase: 'cleaned', cleaned: (j.toDelete || []).length});
         return;
       }
-      groups = buildGroups(j);
-      picks = new Set(groups.replaced.map(x => x.id));
-      log('Cleanup groups', groups);
+      const usage = artworkUsage(await fetchDoc(EDIT));
+      groups = buildGroups(j, usage);
+      picks = new Set(groups.replaced.flat().map(x => x.id));
+      log('Cleanup groups', {replaced: groups.replaced.flat().length, showcases: groups.showcases.length, free: groups.free.length});
       render();
-      hydrateThumbs([...groups.replaced, ...groups.free, ...groups.other].filter(x => !x.good).map(x => x.id));
+      hydrateThumbs([...groups.byId.values()].filter(x => !x.good).map(x => x.id));
     } catch (e) { halt(I('Gallery: ', 'Галерея: ', 'Галерея: ') + e.message); }
     finally { working = false; }
   }
@@ -684,11 +761,15 @@
     if (!isGallery() || working) return;
     const j = state(); if (!j || j.phase !== 'cleanup' || !galleryLoaded || !groups) return;
     const chosen = [...picks];
-    const allowedIDs = new Set([...groups.replaced, ...groups.free].map(x => x.id));
+    const allowedIDs = new Set(groups.byId.keys());
     const protect = new Set(idList(j).filter(okID));
     if (!chosen.length) return report(I('Nothing is ticked.', 'Ничего не отмечено.', 'Нічого не позначено.'), true);
     if (chosen.some(id => protect.has(id) || !allowedIDs.has(id))) return halt(I('Artwork ID mismatch; canceled.', 'Несовпадение ID, отменено.', 'Невідповідність ID, скасовано.'));
     const hide = action === 'private';
+    const inUse = [...new Set(chosen.filter(id => groups.used[id]).map(id => groups.used[id]))];
+    if (inUse.length && !window.confirm(hide
+      ? I(`Some ticked artworks are IN YOUR SHOWCASE:\n\n${inUse.join('\n')}\n\nOnce hidden, visitors will see that showcase without them. Continue?`, `Часть отмеченных работ СТОИТ В ВИТРИНЕ:\n\n${inUse.join('\n')}\n\nПосле скрытия гости увидят эту витрину без них. Продолжить?`, `Частина позначених робіт СТОЇТЬ У ВІТРИНІ:\n\n${inUse.join('\n')}\n\nПісля приховування гості побачать цю вітрину без них. Продовжити?`)
+      : I(`Some ticked artworks are IN YOUR SHOWCASE:\n\n${inUse.join('\n')}\n\nAfter deleting, these slots will be empty on your profile until you put something else there. Continue?`, `Часть отмеченных работ СТОИТ В ВИТРИНЕ:\n\n${inUse.join('\n')}\n\nПосле удаления эти места в профиле опустеют, пока не поставишь туда что-то другое. Продолжить?`, `Частина позначених робіт СТОЇТЬ У ВІТРИНІ:\n\n${inUse.join('\n')}\n\nПісля видалення ці місця в профілі спорожніють, доки не поставиш туди щось інше. Продовжити?`))) return;
     const question = hide
       ? I(`Hide ${chosen.length} artwork(s)?\n\nThey stay in Steam with visibility "Only me". Visitors will no longer see them or the +N counter. You can make them public again in your gallery at any time.`,
           `Скрыть работ: ${chosen.length}?\n\nОни останутся в Steam с видимостью «Только я». Гости больше не увидят их и счётчик +N. Вернуть видимость можно в любой момент в галерее.`, `Приховати робіт: ${chosen.length}?\n\nВони залишаться в Steam з видимістю «Тільки я». Гості більше не бачитимуть їх і лічильник +N. Повернути видимість можна будь-коли в галереї.`)
@@ -722,6 +803,40 @@
     } catch (e) {
       if (!deletionStarted) report(e.message, true); else halt(e.message);
     } finally { working = false; }
+  }
+
+  // ---------- Install a set that is already uploaded ----------
+  // Only sets whose size matches the layout get this button (2 -> 2P, 5 -> 5P, 1 -> 1P); checked again here.
+  function installExisting(layoutKey, ids) {
+    const parts = LAYOUTS[layoutKey]?.parts || [];
+    if (!owner()) return report(I('Sign in to Steam Community first.', 'Сначала войди в Steam Community.', 'Спершу увійди в Steam Community.'), true);
+    if (ids.length !== parts.length || !ids.every(okID))
+      return report(I(`This set does not fit: ${parts.length} item(s) needed.`, `Этот комплект не подходит: нужно предметов: ${parts.length}.`, `Цей комплект не підходить: потрібно предметів: ${parts.length}.`), true);
+    const map = {}; parts.forEach((p, i) => { map[p.key] = String(ids[i]); });
+    mgr = null; groups = null; picks.clear(); message = ''; showcaseChoices = []; chosenKey = '';
+    store({version: 4, layout: layoutKey, existing: true, phase: 'pick-showcase', steamID: owner(), created: Date.now(),
+      meta: {}, ids: map, cur: 0, target: null, oldSlots: [], thumbs: {}});
+    open = true;
+    if (isEdit()) pickShowcase(state()); else goto(EDIT);
+  }
+  // 2P: the Main GIF is the wide one (506 px), the Side is narrow (100 px). Judged by the pictures' proportions;
+  // if they cannot be loaded, the earlier upload (smaller ID) is taken as Main, the order the script uploads them in.
+  function imageRatio(url) {
+    return new Promise(res => {
+      if (!url) return res(0);
+      const im = new Image(); const t = setTimeout(() => res(0), 8000);
+      im.onload = () => { clearTimeout(t); res(im.naturalHeight ? im.naturalWidth / im.naturalHeight : 0); };
+      im.onerror = () => { clearTimeout(t); res(0); };
+      im.src = url;
+    });
+  }
+  async function installPair(items) {
+    const byId = [...items].sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
+    const urls = byId.map(x => thumbCache[x.id] || x.thumb || '');
+    const [r0, r1] = await Promise.all(urls.map(imageRatio));
+    const ordered = r0 && r1 && r1 > r0 ? [byId[1], byId[0]] : byId;
+    log('Install existing 2P', {ids: ordered.map(x => x.id), ratios: [r0, r1]});
+    installExisting('artwork', ordered.map(x => x.id));
   }
 
   // ---------- Start / stop ----------
@@ -767,7 +882,12 @@
   }
 
   // ---------- UI ----------
-  const partLabel = j => { const p = L(j).parts[j?.cur]; return p ? (L(j).kind === 'workshop' ? I(`strip ${p.short} of 5`, `полоса ${p.short} из 5`, `смуга ${p.short} з 5`) : I(p.short + ' GIF', p.key === 'main' ? 'основной GIF' : 'боковой GIF', p.key === 'main' ? 'основний GIF' : 'бічний GIF')) : ''; };
+  const partLabel = j => {
+    const p = L(j).parts[j?.cur]; if (!p) return '';
+    if (j.layout === 'workshop') return I(`strip ${p.short} of 5`, `полоса ${p.short} из 5`, `смуга ${p.short} з 5`);
+    if (j.layout === 'single') return 'GIF';
+    return I(p.short + ' GIF', p.key === 'main' ? 'основной GIF' : 'боковой GIF', p.key === 'main' ? 'основний GIF' : 'бічний GIF');
+  };
   const STEPS = {
     'pick-showcase': [1, () => I('Choose showcase', 'Выбор витрины', 'Вибір вітрини')],
     'upload': [2, j => I(`Uploading ${partLabel(j)}`, `Загрузка: ${partLabel(j)}`, `Завантаження: ${partLabel(j)}`)],
@@ -833,17 +953,23 @@
 
     if (step === 'idle') {
       if (!owner()) h += `<div class="ssr-note ssr-note-bad">${I('Sign in to Steam Community to use this.', 'Войди в Steam Community, чтобы начать.', 'Увійди в Steam Community, щоб почати.')}</div>`;
-      h += `<div class="ssr-tabs"><button type="button" data-layout="artwork" class="${layout === 'artwork' ? 'active' : ''}">${I('Artwork · 2 GIFs', 'Иллюстрации · 2 GIF', 'Ілюстрації · 2 GIF')}</button>
-        <button type="button" data-layout="workshop" class="${layout === 'workshop' ? 'active' : ''}">${I('Workshop · 5 strips', 'Мастерская · 5 полос', 'Майстерня · 5 смуг')}</button></div>`;
+      const tab = (key, title, sub) => `<button type="button" data-layout="${key}" class="${layout === key ? 'active' : ''}">${title}<small>${sub}</small></button>`;
+      h += `<div class="ssr-tabs">${tab('artwork', I('Artwork 2P', 'Иллюстрации 2P', 'Ілюстрації 2P'), I('2 strips', '2 полосы', '2 смуги'))}${tab('workshop', I('Workshop 5P', 'Мастерская 5P', 'Майстерня 5P'), I('5 strips', '5 полос', '5 смуг'))}${tab('single', I('Workshop 1P', 'Мастерская 1P', 'Майстерня 1P'), I('1 strip', '1 полоса', '1 смуга'))}</div>`;
       if (layout === 'artwork') {
         h += `<p>${I('Choose the two GIFs from your artwork set — the script uploads them and puts them into your Artwork Showcase. Nothing is deleted.',
                      'Выбери два GIF из комплекта — скрипт загрузит их и поставит в витрину иллюстраций. Ничего не удаляется.', 'Обери два GIF з комплекту — скрипт завантажить їх і поставить у вітрину ілюстрацій. Нічого не видаляється.')}</p>`;
         h += LAYOUTS.artwork.parts.map(fileField).join('');
+        h += `<button type="button" class="ssr-link ssr-mgr-link" id="ssr-art-open">${I('Manage my artwork (2P) →', 'Управление моими работами (2P) →', 'Керування моїми роботами (2P) →')}</button>`;
+      } else if (layout === 'single') {
+        h += `<p>${I('Choose one GIF — the script uploads it as a Workshop item and puts it into your Workshop Showcase (one large picture). Nothing is deleted.',
+                     'Выбери один GIF — скрипт загрузит его как предмет мастерской и поставит в витрину мастерской (одна большая картинка). Ничего не удаляется.', 'Обери один GIF — скрипт завантажить його як предмет майстерні й поставить у вітрину майстерні (одна велика картинка). Нічого не видаляється.')}</p>`;
+        h += LAYOUTS.single.parts.map(fileField).join('');
+        h += `<button type="button" class="ssr-link ssr-mgr-link" id="ssr-mgr-open">${I('Manage my artwork (1P) →', 'Управление моими работами (1P) →', 'Керування моїми роботами (1P) →')}</button>`;
       } else {
-        h += `<p>${I('Choose the five strips from your set — the script uploads them as Workshop items and puts them into your Workshop Showcase. Nothing is deleted.',
-                     'Выбери пять полос из комплекта — скрипт загрузит их как предметы мастерской и поставит в витрину мастерской. Ничего не удаляется.', 'Обери п’ять смуг з комплекту — скрипт завантажить їх як предмети майстерні й поставить у вітрину майстерні. Нічого не видаляється.')}</p>`;
+        h += `<p>${I('Choose the five strips from your set — the script uploads them as Workshop items and puts them into a row of My Workshop Showcase. Nothing is deleted.',
+                     'Выбери пять полос из комплекта — скрипт загрузит их как предметы мастерской и поставит в ряд витрины моей мастерской. Ничего не удаляется.', 'Обери п’ять смуг з комплекту — скрипт завантажить їх як предмети майстерні й поставить у ряд вітрини моєї майстерні. Нічого не видаляється.')}</p>`;
         h += stripsField();
-        h += `<button type="button" class="ssr-link ssr-mgr-link" id="ssr-mgr-open">${I('My Workshop strips: review and delete old ones →', 'Мои полосы мастерской: обзор и удаление старых →', 'Мої смуги майстерні: огляд і видалення старих →')}</button>`;
+        h += `<button type="button" class="ssr-link ssr-mgr-link" id="ssr-mgr-open">${I('Manage my artwork (5P) →', 'Управление моими работами (5P) →', 'Керування моїми роботами (5P) →')}</button>`;
       }
       const p = setProblem(); if (p) h += `<div class="ssr-note ssr-note-bad">${safe(p)}</div>`;
       const wn = setWarning(); if (wn) h += `<div class="ssr-note">${safe(wn)}</div>`;
@@ -852,18 +978,23 @@
         <button type="button" class="ssr-btn ssr-primary" id="ssr-start" ${ready && rightsOK ? '' : 'disabled'}>${I('Install to my showcase', 'Установить в витрину', 'Встановити у вітрину')}</button>`;
     }
     if (step === 'pick-showcase') {
-      const ws = L(j).kind === 'workshop';
       if (showcaseChoices.length > 1) {
-        h += `<p>${ws ? I('Your profile has several Workshop Showcases. Which one should get the new artwork?', 'В профиле несколько витрин мастерской. В какую поставить новую работу?', 'У профілі кілька вітрин майстерні. У яку поставити нову роботу?')
-                      : I('Your profile has several Artwork Showcases. Which one should get the new artwork?', 'В профиле несколько витрин иллюстраций. В какую поставить новую работу?', 'У профілі кілька вітрин ілюстрацій. У яку поставити нову роботу?')}</p><div class="ssr-choices">`;
+        const sc = showcaseName(j), many = new Set(showcaseChoices.map(c => c.purchase)).size > 1, rows = showcaseChoices.some(c => c.rows > 1);
+        h += `<p>${many ? I(`Your profile has several «${sc}». Where should the new artwork go?`, `В профиле несколько витрин «${sc}». Куда поставить новую работу?`, `У профілі кілька вітрин «${sc}». Куди поставити нову роботу?`)
+                        : I(`«${sc}» has several rows. Which row should get the new artwork?`, `В витрине «${sc}» несколько рядов. В какой ряд поставить новую работу?`, `У вітрині «${sc}» кілька рядів. У який ряд поставити нову роботу?`)}</p>`;
+        if (rows) h += `<small>${I('Row 1 is the top one. The other row stays as it is.', 'Ряд 1 — верхний. Другой ряд останется как есть.', 'Ряд 1 — верхній. Інший ряд залишиться як є.')}</small>`;
+        h += `<div class="ssr-choices">`;
         for (const c of showcaseChoices) {
-          const thumbs = ws ? c.thumbs.map(t => thumbBox(t, 'ssr-mini')).join('') : thumbBox(c.thumbs[0], 'ssr-main') + thumbBox(c.thumbs[1], 'ssr-side');
+          const thumbs = j.layout === 'workshop' ? c.thumbs.map(t => thumbBox(t, 'ssr-mini')).join('')
+            : j.layout === 'single' ? thumbBox(c.thumbs[0], 'ssr-main') : thumbBox(c.thumbs[0], 'ssr-main') + thumbBox(c.thumbs[1], 'ssr-side');
+          const title = `${sc} №${c.position}` + (c.rows > 1 ? ` · ${rowName(c.row)}` : '');
           h += `<label class="ssr-choice ${chosenKey === c.key ? 'sel' : ''}"><input type="radio" name="ssr-sc" value="${safe(c.key)}" ${chosenKey === c.key ? 'checked' : ''}>
             <span class="ssr-pair">${thumbs}</span>
-            <span><b>${showcaseName(j)} №${c.position}</b><small>${I(`#${c.position} from the top among these showcases`, `${c.position}-я сверху среди таких витрин`, `${c.position}-а згори серед таких вітрин`)}</small>
-            ${c.slots.some(okID) ? '' : `<small>${I('empty', 'пустая', 'порожня')}</small>`}</span></label>`;
+            <span><b>${safe(title)}</b>${many ? `<small>${I(`#${c.position} from the top among these showcases`, `${c.position}-я сверху среди таких витрин`, `${c.position}-а згори серед таких вітрин`)}</small>` : ''}
+            ${c.name ? `<small>Steam: ${safe(c.name)}</small>` : ''}
+            ${c.slots.some(okID) ? '' : `<small>${c.rows > 1 ? I('empty row', 'пустой ряд', 'порожній ряд') : I('empty', 'пустая', 'порожня')}</small>`}</span></label>`;
         }
-        h += `</div><button type="button" class="ssr-btn ssr-primary" id="ssr-choose">${I('Use this showcase', 'Ставить сюда', 'Ставити сюди')}</button>`;
+        h += `</div><button type="button" class="ssr-btn ssr-primary" id="ssr-choose">${I('Put it here', 'Ставить сюда', 'Ставити сюди')}</button>`;
       } else h += `<p>${I('Reading your showcases…', 'Читаю витрины профиля…', 'Читаю вітрини профілю…')}</p>`;
     }
     if (['upload', 'apply', 'verify-showcase'].includes(step) || (step === 'pending' && !pendingStuck))
@@ -896,27 +1027,40 @@
         h += `<p class="ssr-muted">${I('See a "+N" tile under the showcase? Those are your other public artworks. You can hide them — optional.', 'Видишь плитку «+N» под витриной? Это другие публичные работы. Их можно скрыть — по желанию.', 'Бачиш плитку «+N» під вітриною? Це інші публічні роботи. Їх можна приховати — за бажанням.')}</p>
         <button type="button" class="ssr-btn" id="ssr-cleanup">${I('Hide old artwork (+N)', 'Скрыть старые работы (+N)', 'Приховати старі роботи (+N)')}</button>`;
       if (L(j).kind === 'workshop')
-        h += `<p class="ssr-muted">${I('Old strips stay in Steam as Workshop items. You can review and delete them — optional.', 'Старые полосы остались в Steam как предметы мастерской. Их можно посмотреть и удалить — по желанию.', 'Старі смуги залишилися в Steam як предмети майстерні. Їх можна переглянути й видалити — за бажанням.')}</p>
-        <button type="button" class="ssr-btn" id="ssr-mgr-open">${I('Review old strips', 'Посмотреть старые полосы', 'Переглянути старі смуги')}</button>`;
+        h += `<p class="ssr-muted">${I('Old items stay in Steam as Workshop items. You can review and delete them — optional.', 'Старые предметы остались в Steam как предметы мастерской. Их можно посмотреть и удалить — по желанию.', 'Старі предмети залишилися в Steam як предмети майстерні. Їх можна переглянути й видалити — за бажанням.')}</p>
+        <button type="button" class="ssr-btn" id="ssr-mgr-open">${I('Review old Workshop items', 'Посмотреть старые предметы', 'Переглянути старі предмети')}</button>`;
       h += `<button type="button" class="ssr-btn ssr-primary" id="ssr-finish">${I('Close', 'Закрыть', 'Закрити')}</button>`;
     }
     if (step === 'cleanup' || step === 'cleanup-verify') {
       if (step === 'cleanup-verify' || !galleryLoaded || !groups) h += `<p>${I('Loading your artwork gallery…', 'Загружаю галерею работ…', 'Завантажую галерею робіт…')}</p>`;
       else {
-        const sec = (title, hint, list, checkable, key) => !list.length ? '' :
-          `<div class="ssr-group"><div class="ssr-group-head"><b>${title} (${list.length})</b>
-            ${checkable ? `<span><button type="button" class="ssr-link" data-all="${key}">${I('all', 'все', 'усі')}</button> · <button type="button" class="ssr-link" data-none="${key}">${I('none', 'снять', 'зняти')}</button></span>` : ''}</div>
-            <small class="ssr-muted">${hint}</small><div class="ssr-tiles">${list.map(x => itemTile(x, checkable, x.where ? I('in: ', 'в: ', 'у: ') + x.where : '')).join('')}</div></div>`;
-        const total = groups.replaced.length + groups.free.length + groups.other.length;
-        if (!total) h += `<p>${I('Nothing to clean up — only the new artwork is in your gallery.', 'Чистить нечего — в галерее только новая работа.', 'Чистити нічого — у галереї тільки нова робота.')}</p>`;
-        h += sec(I('Replaced just now', 'Только что заменённые', 'Щойно замінені'), I('Were in this showcase before. Ticked.', 'Стояли в этой витрине до замены. Уже отмечены.', 'Стояли в цій вітрині до заміни. Уже позначені.'), groups.replaced, true, 'replaced');
-        h += sec(I('Not used anywhere', 'Нигде не используются', 'Ніде не використовуються'), I('Not shown in any showcase. Tick only what you recognise.', 'Не стоят ни в одной витрине. Отмечай только то, что узнаёшь.', 'Не стоять у жодній вітрині. Познач тільки те, що впізнаєш.'), groups.free, true, 'free');
-        h += sec(I('Used in other showcases', 'Стоят в других витринах', 'Стоять в інших вітринах'), I('Protected — the script will not touch these.', 'Защищены — скрипт их не трогает.', 'Захищені — скрипт їх не чіпає.'), groups.other, false, 'other');
-        if (groups.replaced.length + groups.free.length)
+        const setBox = (items, ref, label, warn) => {
+          const on = items.every(x => picks.has(x.id));
+          const inst = items.length === 2 ? `<button type="button" class="ssr-btn ssr-inst" data-inst2="${ref}">${I('Install to showcase', 'Установить в витрину', 'Встановити у вітрину')}</button>` : '';
+          return `<label class="ssr-set ${warn ? 'ssr-inuse' : ''} ${on ? 'on' : ''}"><span><input type="checkbox" data-gset="${ref}" ${on ? 'checked' : ''}> ${warn ? '⚠ ' : ''}${safe(label)}${inst}</span>
+            <span class="ssr-set-strips ssr-pairrow">${items.map(x => `<a href="${itemURL(x.id)}" target="_blank" rel="noopener" title="ID ${x.id}">${thumbBox(x.good ? x.thumb : '', 'ssr-setthumb', x.good ? '' : x.id)}</a>`).join('')}</span></label>`;
+        };
+        const setName = items => items.length === 2 ? I('Set of 2 GIFs', 'Комплект из 2 GIF', 'Комплект із 2 GIF') : I(`${items.length} artwork(s)`, `Работ: ${items.length}`, `Робіт: ${items.length}`);
+        const manage = j.mode === 'manage';
+        const total = groups.byId.size;
+        if (!total) h += `<p>${manage ? I('Your artwork gallery is empty.', 'Галерея работ пуста.', 'Галерея робіт порожня.') : I('Nothing to clean up — only the new artwork is in your gallery.', 'Чистить нечего — в галерее только новая работа.', 'Чистити нічого — у галереї тільки нова робота.')}</p>`;
+        if (groups.replaced.length)
+          h += `<div class="ssr-group"><div class="ssr-group-head"><b>${I('Replaced just now', 'Только что заменённые', 'Щойно замінені')}</b></div>
+            <small class="ssr-muted">${I('Were in this showcase before. Ticked.', 'Стояли в этой витрине до замены. Уже отмечены.', 'Стояли в цій вітрині до заміни. Уже позначені.')}</small>${setBox(groups.replaced[0], 'replaced:0', setName(groups.replaced[0]), false)}</div>`;
+        if (groups.showcases.length)
+          h += `<div class="ssr-group"><div class="ssr-group-head"><b>${I('In your showcases', 'Стоят в витринах', 'Стоять у вітринах')}</b></div>
+            <small class="ssr-muted">${I('Can be hidden or deleted too — the script warns you first; the showcase slots will then look empty to visitors.', 'Их тоже можно скрыть или удалить — скрипт сначала предупредит; места в витрине тогда опустеют для гостей.', 'Їх теж можна приховати або видалити — скрипт спершу попередить; місця у вітрині тоді спорожніють для гостей.')}</small>
+            ${groups.showcases.map((sc, i) => setBox(sc.items, `showcases:${i}`, sc.label, true)).join('')}</div>`;
+        if (groups.free.length)
+          h += `<div class="ssr-group"><div class="ssr-group-head"><b>${I('Not used anywhere', 'Нигде не используются', 'Ніде не використовуються')} (${groups.free.reduce((n, x) => n + x.length, 0)})</b>
+            <span><button type="button" class="ssr-link" id="ssr-g-all">${I('all', 'все', 'усі')}</button> · <button type="button" class="ssr-link" id="ssr-g-none">${I('none', 'снять', 'зняти')}</button></span></div>
+            <small class="ssr-muted">${I('Grouped into sets by upload order, newest first. Tick only what you recognise; click a picture to open it on Steam.', 'Сгруппированы в комплекты по порядку загрузки, новые сверху. Отмечай только то, что узнаёшь; нажми на картинку, чтобы открыть её в Steam.', 'Згруповані в комплекти за порядком завантаження, нові зверху. Познач тільки те, що впізнаєш; натисни на картинку, щоб відкрити її в Steam.')}</small>
+            ${groups.free.map((set, i) => setBox(set, `free:${i}`, setName(set), false)).join('')}</div>`;
+        if (total)
           h += `<button type="button" class="ssr-btn ssr-primary" id="ssr-hide" ${picks.size ? '' : 'disabled'}>${I(`Hide ticked (${picks.size})`, `Скрыть отмеченные (${picks.size})`, `Приховати позначені (${picks.size})`)}</button>
             <small class="ssr-muted">${I('Hidden artwork stays in Steam as "Only me" — reversible. Visitors no longer see the +N tile; you still see it on your own profile.', 'Скрытые работы остаются в Steam с видимостью «Только я» — это обратимо. Гости больше не видят плитку +N; ты на своём профиле её видишь.', 'Приховані роботи залишаються в Steam з видимістю «Тільки я» — це оборотно. Гості більше не бачать плитку +N; ти на своєму профілі її бачиш.')}</small>
             <button type="button" class="ssr-link ssr-del-link" id="ssr-delete" ${picks.size ? '' : 'disabled'}>${I('or delete them permanently…', 'или удалить навсегда…', 'або видалити назавжди…')}</button>`;
-        h += `<button type="button" class="ssr-btn" id="ssr-finish">${I('Leave everything as is', 'Ничего не менять, закрыть', 'Нічого не змінювати, закрити')}</button>`;
+        h += `<button type="button" class="ssr-btn" id="ssr-finish">${manage ? I('Close', 'Закрыть', 'Закрити') : I('Leave everything as is', 'Ничего не менять, закрыть', 'Нічого не змінювати, закрити')}</button>`;
       }
     }
     if (step === 'cleaned') {
@@ -946,8 +1090,9 @@
     ui.innerHTML = `<div class="ssr-top"><button type="button" class="ssr-head" id="ssr-toggle">▣ Showcase Refresher <span>${open ? '−' : '+'}</span></button>
       <div class="ssr-lang">${LANGS.map(([c, t]) => `<button type="button" data-lang="${c}" class="${language === c ? 'active' : ''}">${t}</button>`).join('')}</div></div>
       <div class="ssr-body">${body(j)}
-      <div class="ssr-footer">Steam Showcase Refresher ${VERSION}<br>
-      Alex Nocturne · <a href="${SHOP}" target="_blank" rel="noopener noreferrer">${I('choose artwork here', 'выбрать иллюстрацию здесь', 'обрати ілюстрацію тут')}</a><br>
+      <div class="ssr-footer">Steam Showcase Refresher ${VERSION} · ${RELEASE_YEAR}<br>
+      ${I('Works best with my artwork', 'Лучше всего работает с моими иллюстрациями', 'Найкраще працює з моїми ілюстраціями')}<br>
+      Alex Nocturne · <a class="ssr-shop" href="${SHOP}" target="_blank" rel="noopener noreferrer">${I('choose artwork here', 'выбрать иллюстрацию здесь', 'обрати ілюстрацію тут')}</a><br>
       ${I('Provided as is, without support. Not affiliated with Valve.', 'Предоставляется «как есть», без поддержки. Не связан с Valve.', 'Надається «як є», без підтримки. Не пов’язаний з Valve.')}</div></div>`;
     const on = (id, cb) => { const e = $('#' + id, ui); if (e) e.onclick = cb; };
     on('ssr-toggle', () => { open = !open; render(); });
@@ -956,7 +1101,7 @@
     $$('[data-lang]', ui).forEach(e => e.onclick = () => { language = e.dataset.lang; try { localStorage.setItem(LANG_KEY, language); } catch {} message = ''; render(); });
     $$('[data-layout]', ui).forEach(b => b.onclick = () => { layout = b.dataset.layout; message = ''; render(); });
     $$('[data-pick-file]', ui).forEach(b => b.onclick = () => $('#ssr-in-' + b.dataset.pickFile, ui)?.click());
-    for (const part of LAYOUTS.artwork.parts) { const inp = $('#ssr-in-' + part.key, ui); if (inp) inp.onchange = e => onPick(part.key, e.target.files?.[0] || null); }
+    for (const part of [...LAYOUTS.artwork.parts, ...LAYOUTS.single.parts]) { const inp = $('#ssr-in-' + part.key, ui); if (inp) inp.onchange = e => onPick(part.key, e.target.files?.[0] || null); }
     on('ssr-pick-many', () => $('#ssr-in-many', ui)?.click());
     const many = $('#ssr-in-many', ui); if (many) many.onchange = e => onPickMany(e.target.files || []);
     const r = $('#ssr-rights', ui); if (r) r.onchange = () => { rightsOK = r.checked; render(); };
@@ -973,10 +1118,15 @@
     on('ssr-delete', () => batchOld('delete'));
     on('ssr-retry', retry);
     on('ssr-stop', () => { if (confirm(I('Stop? Artwork already uploaded or deleted on Steam stays as it is.', 'Остановить? Уже загруженное или удалённое в Steam останется как есть.', 'Зупинити? Уже завантажене чи видалене в Steam залишиться як є.'))) finish(); });
-    $$('[data-all]', ui).forEach(b => b.onclick = () => { (groups?.[b.dataset.all] || []).forEach(x => picks.add(x.id)); render(); });
-    $$('[data-none]', ui).forEach(b => b.onclick = () => { (groups?.[b.dataset.none] || []).forEach(x => picks.delete(x.id)); render(); });
+    const gsetItems = ref => { const [k, i] = ref.split(':'); const g = groups?.[k]?.[+i]; return Array.isArray(g) ? g : g?.items || []; };
+    $$('[data-gset]', ui).forEach(el => el.onchange = () => { gsetItems(el.dataset.gset).forEach(x => el.checked ? picks.add(x.id) : picks.delete(x.id)); render(); });
+    $$('[data-inst2]', ui).forEach(b => b.onclick = e => { e.preventDefault(); e.stopPropagation(); const items = gsetItems(b.dataset.inst2); if (items.length === 2) installPair(items); });
+    on('ssr-g-all', () => { (groups?.free || []).flat().forEach(x => picks.add(x.id)); render(); });
+    on('ssr-g-none', () => { picks.clear(); render(); });
+    on('ssr-art-open', () => { if (!owner()) return report(I('Sign in to Steam Community first.', 'Сначала войди в Steam Community.', 'Спершу увійди в Steam Community.'), true);
+      store({version: 4, layout: 'artwork', mode: 'manage', phase: 'cleanup', steamID: owner(), created: Date.now(), ids: {}, oldSlots: [], thumbs: {}});
+      galleryLoaded = false; groups = null; picks.clear(); open = true; if (isGallery()) cleanupScan(); else goto(GALLERY); });
     $$('img[data-tid]', ui).forEach(im => im.addEventListener('error', () => { if (im.dataset.orig && im.src !== im.dataset.orig) im.src = im.dataset.orig; }));
-    $$('[data-del]', ui).forEach(el => el.onchange = () => { if (el.checked) picks.add(el.dataset.del); else picks.delete(el.dataset.del); render(); });
   }
 
   // ---------- Workshop manager: overview and deletion of my Workshop items ----------
@@ -1054,18 +1204,26 @@
       const key = `${type}_${purchase}`;
       const label = names[key] || I('a showcase', 'витрина', 'вітрина');
       used[id] = label;
-      if (type === '12') (byKey[key] = byKey[key] || {label, slots: []}).slots[obj.slot] = id;
+      if (type === '12' || type === '11') {
+        const row = type === '12' ? Math.floor(obj.slot / 5) : 0;
+        const rk = `${key}:${row}`;
+        (byKey[rk] = byKey[rk] || {label, row, type, slots: []}).slots[obj.slot] = id;
+      }
     }
-    for (const k of Object.keys(byKey)) showcases.push({label: byKey[k].label, ids: byKey[k].slots.filter(okID)});
+    const multi = new Set(Object.keys(byKey).filter(k => byKey[k].row > 0).map(k => k.replace(/:\d+$/, '')));
+    for (const k of Object.keys(byKey)) {
+      const b = byKey[k], base = k.replace(/:\d+$/, '');
+      showcases.push({label: b.label + (multi.has(base) ? ` · ${rowName(b.row + 1)}` : ''), ids: b.slots.filter(okID)});
+    }
     return {used, showcases};
   }
   // Group free items into sets: consecutive uploads with close IDs, at most five per set.
-  function makeSets(items) {
+  function makeSets(items, max = 5) {
     const sorted = [...items].sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
     const runs = [];
     for (const it of sorted) {
       const run = runs[runs.length - 1];
-      if (run && run.length < 5 && BigInt(it.id) - BigInt(run[run.length - 1].id) < BigInt(SET_GAP)) run.push(it);
+      if (run && run.length < max && BigInt(it.id) - BigInt(run[run.length - 1].id) < BigInt(SET_GAP)) run.push(it);
       else runs.push([it]);
     }
     return runs.reverse();  // newest first
@@ -1075,8 +1233,11 @@
     open = true; render();
     try {
       const [items, edit] = await Promise.all([loadAllPopupItems(), fetchDoc(EDIT)]);
-      const {used, showcases} = showcaseUsage(edit);
+      const usage = showcaseUsage(edit);
       const byId = new Map(items.map(x => [x.id, x]));
+      // Steam keeps the IDs of deleted items in showcase slots; show only items that still exist.
+      const used = usage.used;
+      const showcases = usage.showcases.map(sc => ({...sc, ids: sc.ids.filter(id => byId.has(id))})).filter(sc => sc.ids.length);
       const free = items.filter(x => !used[x.id]);
       mgr = {...mgr, loading: false, items, byId, used, showcases, sets: makeSets(free)};
       log('Workshop manager', JSON.stringify({items: items.length, used, showcases, sets: mgr.sets.length}));
@@ -1087,30 +1248,72 @@
     }
   }
   // Reads the delete form from the item's own page (only its owner gets one) and submits it in the background.
+  // Deleting a Workshop item = POST /sharedfiles/delete {id, appid, sessionid, file_type}, the request Steam's own
+  // "Delete" button sends (checked against a real request, 2026-10). Steam silently ignores it unless it comes
+  // from the item's page (Referer). So: 1) a background request with that Referer; 2) if the item is still there,
+  // the same form is submitted from a hidden copy of the item page. Each step is checked by re-reading the page.
+  const itemExists = html => /id=["']?PublishedFileDelete|editrequireddlc\//.test(html);
+  async function itemPage(id) {
+    const r = await fetch(itemURL(id) + '&ssr=' + Date.now(), {credentials: 'include'});
+    return r.ok ? await r.text() : '';
+  }
+  function deleteFields(id, html, session) {
+    const appid = (html.match(/["']?(?:consumer_appid|creator_appid|consumer_app_id)["']?\s*[:=]\s*["']?(\d{2,10})/i) || [])[1] || String(WORKSHOP_APP);
+    return {id: String(id), appid, sessionid: String(session || sw.g_sessionID || ''), file_type: '0'};
+  }
+  function deleteViaFrame(id, fields) {
+    return new Promise((resolve, reject) => {
+      const f = document.createElement('iframe');
+      f.style.cssText = 'position:fixed;width:1px;height:1px;left:-10px;top:-10px;opacity:0;border:0';
+      let sent = false;
+      const done = err => { clearTimeout(timer); f.remove(); err ? reject(err) : resolve(); };
+      const timer = setTimeout(() => done(Error(I('Steam did not answer in time', 'Steam не ответил вовремя', 'Steam не відповів вчасно'))), 30000);
+      f.onload = () => {
+        try {
+          if (sent) return done();
+          const d = f.contentDocument, w = f.contentWindow;
+          if (!d?.body) return done(Error(I('item page did not open', 'страница предмета не открылась', 'сторінка предмета не відкрилася')));
+          const form = d.createElement('form');
+          form.method = 'POST'; form.action = 'https://steamcommunity.com/sharedfiles/delete';
+          for (const [k, v] of Object.entries({...fields, sessionid: String(w.g_sessionID || fields.sessionid)})) {
+            const inp = d.createElement('input'); inp.type = 'hidden'; inp.name = k; inp.value = v; form.append(inp);
+          }
+          d.body.append(form); sent = true;
+          w.HTMLFormElement.prototype.submit.call(form);
+        } catch (e) { done(e); }
+      };
+      f.src = itemURL(id);
+      document.body.append(f);
+    });
+  }
   async function deleteWorkshopItem(id) {
-    const d = await fetchDoc(itemURL(id));
-    const form = d.querySelector('form#PublishedFileDelete, form[action*="/sharedfiles/delete"]');
-    if (!form) throw Error(I('no delete form (not your item, or already deleted)', 'нет формы удаления (не твой предмет или уже удалён)', 'немає форми видалення (не твій предмет або вже видалений)'));
-    const fd = new URLSearchParams();
-    for (const inp of form.querySelectorAll('input[name]')) fd.set(inp.name, inp.value);
-    if (fd.get('id') !== String(id)) throw Error(I('form is for another item', 'форма относится к другому предмету', 'форма стосується іншого предмета'));
-    fd.set('sessionid', String(sw.g_sessionID || fd.get('sessionid') || ''));
-    const action = new URL(form.getAttribute('action') || '/sharedfiles/delete', location.href);
-    if (action.origin !== location.origin) throw Error(I('unexpected form destination', 'неожиданный адрес формы', 'неочікувана адреса форми'));
-    const r = await fetch(action.href, {method: 'POST', credentials: 'include', body: fd});
-    if (!r.ok) throw Error(`HTTP ${r.status}`);
+    const html = await itemPage(id);
+    if (!itemExists(html)) throw Error(I('not your item, or already deleted', 'не твой предмет или уже удалён', 'не твій предмет або вже видалений'));
+    const fields = deleteFields(id, html);
+    if (!fields.sessionid) throw Error(I('no Steam session id on this page', 'на странице нет идентификатора сессии Steam', 'на сторінці немає ідентифікатора сесії Steam'));
+    const r = await fetch('https://steamcommunity.com/sharedfiles/delete', {method: 'POST', credentials: 'include',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},   // exactly as the form sends it, no charset
+      body: new URLSearchParams(fields).toString(), referrer: itemURL(id), referrerPolicy: 'unsafe-url'});
+    log('delete request', id, fields.appid, r.status);
+    if (!itemExists(await itemPage(id))) return;
+    log('delete: item still there, submitting the form from the item page', id);
+    await deleteViaFrame(id, fields);
+    if (itemExists(await itemPage(id))) throw Error(I('Steam did not delete it', 'Steam не удалил его', 'Steam не видалив його'));
   }
   async function deletePicked() {
     if (!mgr || mgr.busy) return;
     const ids = [...mgr.picks];
     if (!ids.length) return;
     const inUse = [...new Set(ids.filter(id => mgr.used[id]).map(id => mgr.used[id]))];
-    if (inUse.length && !window.confirm(I(`Some ticked strips are IN YOUR SHOWCASE:\n\n${inUse.join('\n')}\n\nAfter deleting, these slots will be empty on your profile until you put something else there. Continue?`,
-                                           `Часть отмеченных полос СТОИТ В ВИТРИНЕ:\n\n${inUse.join('\n')}\n\nПосле удаления эти места в профиле опустеют, пока не поставишь туда что-то другое. Продолжить?`, `Частина позначених смуг СТОЇТЬ У ВІТРИНІ:\n\n${inUse.join('\n')}\n\nПісля видалення ці місця в профілі спорожніють, доки не поставиш туди щось інше. Продовжити?`))) return;
+    if (inUse.length && !window.confirm(I(`Some ticked items are IN YOUR SHOWCASE:\n\n${inUse.join('\n')}\n\nAfter deleting, these slots will be empty on your profile until you put something else there. Continue?`,
+                                           `Часть отмеченных предметов СТОИТ В ВИТРИНЕ:\n\n${inUse.join('\n')}\n\nПосле удаления эти места в профиле опустеют, пока не поставишь туда что-то другое. Продолжить?`, `Частина позначених предметів СТОЇТЬ У ВІТРИНІ:\n\n${inUse.join('\n')}\n\nПісля видалення ці місця в профілі спорожніють, доки не поставиш туди щось інше. Продовжити?`))) return;
     if (!window.confirm(I(`Permanently delete ${ids.length} Workshop item(s)? This cannot be undone.`,
                           `Безвозвратно удалить предметов мастерской: ${ids.length}? Отменить это нельзя.`, `Безповоротно видалити предметів майстерні: ${ids.length}? Скасувати це неможливо.`))) return;
     mgr.busy = {done: 0, total: ids.length}; mgr.failed = []; mgr.note = ''; render();
-    for (const [n, id] of ids.entries()) {
+    // A plain index loop: Steam pages load Prototype.js, which replaces Array.prototype.entries
+    // (it returned the IDs themselves, so [n, id] split "3818…" into "3" and "8").
+    for (let n = 0; n < ids.length; n++) {
+      const id = ids[n];
       if (n) await sleep(DELETE_PAUSE);   // Steam may ignore or refuse deletions sent too quickly
       try { await deleteWorkshopItem(id); }
       catch (e) { mgr.failed.push(`${id}: ${e.message}`); log('delete failed', id, e.message); }
@@ -1124,12 +1327,18 @@
       (failed.length ? '\n' + failed.join('\n') : '');
     render();
   }
+  // 5 items -> only My Workshop Showcase (5P); 1 item -> only Workshop Showcase (1P); other sizes get no button.
+  function instButton(ids) {
+    if (ids.length === 5) return `<button type="button" class="ssr-btn ssr-inst" data-inst="workshop" data-ids="${ids.join(',')}">${I('Install as 5P', 'Установить как 5P', 'Встановити як 5P')}</button>`;
+    if (ids.length === 1) return `<button type="button" class="ssr-btn ssr-inst" data-inst="single" data-ids="${ids.join(',')}">${I('Install as 1P', 'Установить как 1P', 'Встановити як 1P')}</button>`;
+    return '';
+  }
   function stripRow(ids, cls = '') {
     return `<span class="ssr-set-strips ${cls}">${ids.map(id => `<a href="${itemURL(id)}" target="_blank" rel="noopener" title="ID ${id}">${thumbBox(mgr.byId?.get(id)?.thumb || '', 'ssr-setthumb', id)}</a>`).join('')}</span>`;
   }
   function managerBody() {
     let h = `<div class="ssr-mgr-head"><button type="button" class="ssr-link" id="ssr-mgr-back">← ${I('Back', 'Назад', 'Назад')}</button>
-      <b>${I('My Workshop strips', 'Мои полосы мастерской', 'Мої смуги майстерні')}</b>
+      <b>${I('My Workshop items', 'Мои предметы мастерской', 'Мої предмети майстерні')}</b>
       <button type="button" class="ssr-link" id="ssr-mgr-reload" ${mgr.loading || mgr.busy ? 'disabled' : ''}>${I('Refresh', 'Обновить', 'Оновити')}</button></div>`;
     if (mgr.note) h += `<div class="ssr-note" style="white-space:pre-line">${safe(mgr.note)}</div>`;
     if (mgr.busy) return h + `<p>${I(`Deleting ${mgr.busy.done} of ${mgr.busy.total}… Keep this tab open.`, `Удаляю ${mgr.busy.done} из ${mgr.busy.total}… Не закрывай вкладку.`, `Видаляю ${mgr.busy.done} з ${mgr.busy.total}… Не закривай вкладку.`)}</p>`;
@@ -1141,7 +1350,7 @@
         <small class="ssr-muted">${I('Can be deleted too — the showcase slots will then be empty.', 'Их тоже можно удалить — тогда места в витрине опустеют.', 'Їх теж можна видалити — тоді місця у вітрині спорожніють.')}</small>`;
       mgr.showcases.forEach((sc, i) => {
         const on = sc.ids.length && sc.ids.every(id => mgr.picks.has(id));
-        h += `<label class="ssr-set ssr-inuse ${on ? 'on' : ''}"><span><input type="checkbox" data-showcase="${i}" ${on ? 'checked' : ''}> ⚠ ${safe(sc.label)}</span>${stripRow(sc.ids)}</label>`;
+        h += `<label class="ssr-set ssr-inuse ${on ? 'on' : ''}"><span><input type="checkbox" data-showcase="${i}" ${on ? 'checked' : ''}> ⚠ ${safe(sc.label)}${instButton(sc.ids)}</span>${stripRow(sc.ids)}</label>`;
       });
       h += `</div>`;
     }
@@ -1151,12 +1360,12 @@
     h += `<div class="ssr-group"><div class="ssr-group-head"><b>${I('Not used anywhere', 'Нигде не используются', 'Ніде не використовуються')} (${mgr.sets.reduce((n, s) => n + s.length, 0)})</b>
       ${mgr.sets.length ? `<span><button type="button" class="ssr-link" id="ssr-mgr-all">${I('all', 'все', 'усі')}</button> · <button type="button" class="ssr-link" id="ssr-mgr-none">${I('none', 'снять', 'зняти')}</button></span>` : ''}</div>`;
     if (!mgr.sets.length) h += `<small class="ssr-muted">${I('Nothing to clean up.', 'Чистить нечего.', 'Чистити нічого.')}</small>`;
-    else h += `<small class="ssr-muted">${I('Grouped into sets by upload order, newest first. Click a set to tick it; click a strip to open it on Steam.',
-                                          'Сгруппированы в комплекты по порядку загрузки, новые сверху. Нажми на комплект, чтобы отметить его; на полосу — чтобы открыть её в Steam.', 'Згруповані в комплекти за порядком завантаження, нові зверху. Натисни на комплект, щоб позначити його; на смугу — щоб відкрити її в Steam.')}</small>`;
+    else h += `<small class="ssr-muted">${I('Grouped into sets by upload order, newest first. Click a set to tick it; click a picture to open it on Steam.',
+                                          'Сгруппированы в комплекты по порядку загрузки, новые сверху. Нажми на комплект, чтобы отметить его; на картинку — чтобы открыть её в Steam.', 'Згруповані в комплекти за порядком завантаження, нові зверху. Натисни на комплект, щоб позначити його; на картинку — щоб відкрити її в Steam.')}</small>`;
     mgr.sets.forEach((set, i) => {
       const ids = set.map(x => x.id), on = ids.every(id => mgr.picks.has(id));
       h += `<label class="ssr-set ${on ? 'on' : ''}"><span><input type="checkbox" data-set="${i}" ${on ? 'checked' : ''}>
-        ${set.length === 5 ? I('Set of 5 strips', 'Комплект из 5 полос', 'Комплект із 5 смуг') : I(`${set.length} strip(s)`, `Полос: ${set.length}`, `Смуг: ${set.length}`)}</span>${stripRow(ids)}</label>`;
+        ${set.length === 5 ? I('Set of 5 strips', 'Комплект из 5 полос', 'Комплект із 5 смуг') : I(`${set.length} item(s)`, `Предметов: ${set.length}`, `Предметів: ${set.length}`)}${instButton(ids)}</span>${stripRow(ids)}</label>`;
     });
     h += `</div>`;
     const n = [...mgr.picks].length;
@@ -1168,6 +1377,7 @@
     on('ssr-mgr-back', () => { mgr = null; render(); });
     on('ssr-mgr-reload', () => openManager());
     on('ssr-mgr-delete', deletePicked);
+    $$('[data-inst]', ui).forEach(b => b.onclick = e => { e.preventDefault(); e.stopPropagation(); installExisting(b.dataset.inst, b.dataset.ids.split(',')); });
     on('ssr-mgr-all', () => { mgr.sets.flat().forEach(x => mgr.picks.add(x.id)); render(); });
     on('ssr-mgr-none', () => { mgr.picks.clear(); render(); });
     $$('[data-showcase]', ui).forEach(el => el.onchange = () => {
@@ -1190,6 +1400,11 @@
     if (j.phase === 'pending') {
       const id = successID(j); if (id) return gotID(id);
       const wait = 60000 - (Date.now() - (j.submittedAt || 0));
+      if (/^\/workshop\/?$/.test(location.pathname)) {
+        pendingStuck = true;
+        report(I('Steam rejected the upload and opened the Workshop home page (usually the file is too large).', 'Steam отклонил загрузку и открыл главную страницу мастерской (обычно файл слишком большой).', 'Steam відхилив завантаження й відкрив головну сторінку майстерні (зазвичай файл завеликий).'), true);
+        return;
+      }
       if (isUpload() || wait <= 0) { pendingStuck = true; render(); }
       else setTimeout(() => { if (state()?.phase === j.phase) { pendingStuck = true; render(); } }, wait);
       return;
@@ -1223,6 +1438,7 @@
 #ssr-panel .ssr-body{padding:12px;display:flex;flex-direction:column;gap:9px}
 #ssr-panel p{margin:0}#ssr-panel small{display:block;font-size:11px;color:#8ea4b6}
 #ssr-panel a{color:#66c0f4}
+#ssr-panel a.ssr-shop{color:#ff4db7;font-weight:700}   /* the shop's "Choose your artwork" button colour */
 #ssr-panel .ssr-btn{padding:8px 10px;border:1px solid #3f5b72;border-radius:5px;background:#24384c;color:#fff;cursor:pointer;font:13px Arial,sans-serif}
 #ssr-panel .ssr-btn:hover:not(:disabled){filter:brightness(1.15)}
 #ssr-panel .ssr-btn:disabled{opacity:.45;cursor:default}
@@ -1249,12 +1465,15 @@
 #ssr-panel .ssr-set > span:first-child{display:flex;gap:7px;align-items:center;font-weight:600}
 #ssr-panel .ssr-set-strips{display:flex;gap:2px;justify-content:center}
 #ssr-panel .ssr-set-strips a{flex:0 1 auto;max-width:19%;display:flex}
+#ssr-panel .ssr-pairrow a{max-width:72%}
+#ssr-panel .ssr-btn.ssr-inst{margin-left:auto;padding:3px 8px;font-size:11.5px;font-weight:400;white-space:nowrap;flex-shrink:0}
 #ssr-panel .ssr-thumb.ssr-setthumb{width:auto;max-width:100%;min-width:16px;height:170px;border-radius:2px;background:none}
 #ssr-panel .ssr-thumb.ssr-setthumb img{width:auto;max-width:100%;height:100%;object-fit:contain}
 #ssr-panel .ssr-thumb.ssr-mini{width:14px;height:60px;border-radius:2px}
 #ssr-panel .ssr-tabs{display:flex;gap:4px;background:#0f1822;padding:3px;border-radius:7px}
 #ssr-panel .ssr-tabs button{flex:1;padding:6px 4px;border:0;border-radius:5px;background:none;color:#9fb6c8;cursor:pointer;font:600 12px Arial,sans-serif}
 #ssr-panel .ssr-tabs button.active{background:#2a75bb;color:#fff}
+#ssr-panel .ssr-tabs button small{font-weight:400;font-size:11px;color:inherit;opacity:.8}
 #ssr-panel .ssr-multi{flex-direction:column}
 #ssr-panel .ssr-strips{display:flex;gap:4px;justify-content:center;width:100%}
 #ssr-panel .ssr-strip{position:relative;width:44px;height:150px;background:#0d141c;border:2px solid transparent;border-radius:3px;overflow:hidden;display:flex;align-items:flex-end;justify-content:center}
