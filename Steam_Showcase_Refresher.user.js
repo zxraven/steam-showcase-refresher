@@ -3,7 +3,7 @@
 // @name:uk      Steam Showcase Refresher
 // @name:ru      Steam Showcase Refresher
 // @namespace    alex.nocturne.steam.showcase
-// @version      1.15
+// @version      1.16
 // @description  Install an animated Steam showcase in a few clicks: Artwork Showcase (2 GIFs), My Workshop Showcase (5 strips) or Featured Artwork Showcase (1 GIF).
 // @description:uk  Анімована вітрина в профілі Steam у кілька кліків: вітрина ілюстрацій (2 GIF), вітрина моєї майстерні (5 смуг) або вітрина вибраних ілюстрацій (1 GIF).
 // @description:ru  Анимированная витрина в профиле Steam в несколько кликов: витрина иллюстраций (2 GIF), витрина моей мастерской (5 полос) или витрина избранных иллюстраций (1 GIF).
@@ -37,7 +37,7 @@
  */
 (() => {
   'use strict';
-  const VERSION = '1.15';
+  const VERSION = '1.16';
   const RELEASE_YEAR = 2026;         // year of this release, shown in the panel footer
   const sw = typeof unsafeWindow === 'undefined' ? window : unsafeWindow;
   const K = 'steamShowcaseRefresher.job.v4';
@@ -55,8 +55,8 @@
   const LAYOUTS = {
     artwork: {kind: 'artwork', type: 13, rowSize: 0,
       name: {en: 'Artwork Showcase', ru: 'Витрина иллюстраций', uk: 'Вітрина ілюстрацій'}, parts: [
-      {key: 'main', width: 506, en: 'Main GIF (wide, 506 px)', ru: 'Основной GIF (широкий, 506 px)', uk: 'Основний GIF (широкий, 506 px)', short: 'Main'},
-      {key: 'side', width: 100, en: 'Side GIF (narrow, 100 px)', ru: 'Боковой GIF (узкий, 100 px)', uk: 'Бічний GIF (вузький, 100 px)', short: 'Side'},
+      {key: 'main', width: 506, png: true, en: 'Main GIF / APNG (wide, 506 px)', ru: 'Основной GIF / APNG (широкий, 506 px)', uk: 'Основний GIF / APNG (широкий, 506 px)', short: 'Main'},
+      {key: 'side', width: 100, png: true, en: 'Side GIF / APNG (narrow, 100 px)', ru: 'Боковой GIF / APNG (узкий, 100 px)', uk: 'Бічний GIF / APNG (вузький, 100 px)', short: 'Side'},
     ]},
     workshop: {kind: 'workshop', type: 12, rowSize: 5,
       name: {en: 'My Workshop Showcase', ru: 'Витрина моей мастерской', uk: 'Вітрина моєї майстерні'}, parts: [1, 2, 3, 4, 5].map(n =>
@@ -107,6 +107,7 @@
   let rightsOK = false;
   let showcaseChoices = [], chosenKey = '';
   let galleryLoaded = false, groups = null, picks = new Set(), deletionStarted = false;
+  let fview = 'all', fq = '';   // 1.16: filter and ID search of the full-screen artwork manager
   let recoverCandidate = null, pendingStuck = false;
 
   // Layout helpers. j = persisted job.
@@ -191,24 +192,62 @@
   const getFile = name => dbRun('readonly', s => s.get(name));
   const wipeFiles = () => dbRun('readwrite', s => s.clear());
 
-  // ---------- GIF validation ----------
-  async function checkGif(file, width) {
-    if (!file) throw Error(I('Choose a GIF file.', 'Выбери GIF-файл.', 'Обери GIF-файл.'));
-    if (file.size > HARD_LIMIT) throw Error(I(`${mb(file.size)}: too large. Each GIF must be 5 MB or less, Steam rejects bigger uploads.`, `${mb(file.size)}: слишком большой. Каждый GIF должен быть не больше 5 МБ, большие файлы Steam отклоняет.`, `${mb(file.size)}: завеликий. Кожен GIF має бути не більше 5 МБ, більші файли Steam відхиляє.`));
+  // ---------- GIF / APNG validation ----------
+  // 1.16-dev11: the 2P parts may also be PNG / APNG (true alpha - the profile background shows through).
+  // Long artwork trick for PNG (guide "Upload Transparent Images to Steam"): the IEND chunk gets one data byte
+  // (00 00 00 01 'IEND' 00 + its CRC D1 1A 4F E1), the file grows by 1 byte. Applied to a copy only.
+  const PNG_SIG = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+  const IEND_STD = [0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82];
+  const IEND_LONG = [0x00, 0x00, 0x00, 0x01, 0x49, 0x45, 0x4E, 0x44, 0x00, 0xD1, 0x1A, 0x4F, 0xE1];
+  const endsWith = (bytes, tail) => bytes.length >= tail.length && tail.every((b, i) => bytes[bytes.length - tail.length + i] === b);
+  async function pngInfo(file) {
+    // Walks the chunks up to the first IDAT: size from IHDR, animation from acTL (APNG).
+    const buf = new Uint8Array(await file.slice(0, Math.min(file.size, 1 << 20)).arrayBuffer());
+    const u32 = o => ((buf[o] << 24) >>> 0) + (buf[o + 1] << 16) + (buf[o + 2] << 8) + buf[o + 3];
+    let o = 8, w = 0, h = 0, frames = 0;
+    while (o + 8 <= buf.length) {
+      const len = u32(o), type = String.fromCharCode(buf[o + 4], buf[o + 5], buf[o + 6], buf[o + 7]);
+      if (type === 'IHDR') { w = u32(o + 8); h = u32(o + 12); }
+      else if (type === 'acTL') frames = u32(o + 8);
+      else if (type === 'IDAT') break;
+      o += 12 + len;
+    }
+    return {w, h, frames};
+  }
+  async function checkGif(file, width, allowPng = false) {
+    const kind = allowPng ? I('GIF or APNG', 'GIF или APNG', 'GIF або APNG') : 'GIF';
+    if (!file) throw Error(I(`Choose a ${kind} file.`, `Выбери файл ${kind}.`, `Обери файл ${kind}.`));
+    if (file.size > HARD_LIMIT) throw Error(I(`${mb(file.size)}: too large. Each file must be 5 MB or less, Steam rejects bigger uploads.`, `${mb(file.size)}: слишком большой. Каждый файл должен быть не больше 5 МБ, большие файлы Steam отклоняет.`, `${mb(file.size)}: завеликий. Кожен файл має бути не більше 5 МБ, більші файли Steam відхиляє.`));
     if (file.size < 16) throw Error(I('The file is empty or damaged.', 'Файл пустой или повреждён.', 'Файл порожній або пошкоджений.'));
     const head = new Uint8Array(await file.slice(0, 10).arrayBuffer());
     const magic = String.fromCharCode(...head.slice(0, 6));
-    if (!['GIF89a', 'GIF87a'].includes(magic)) throw Error(I('This is not a GIF file.', 'Это не GIF-файл.', 'Це не GIF-файл.'));
-    const w = head[6] + (head[7] << 8), h = head[8] + (head[9] << 8);
+    const isPng = PNG_SIG.every((b, i) => head[i] === b);
+    let w, h, mime = 'image/gif', format = 'GIF';
+    if (['GIF89a', 'GIF87a'].includes(magic)) { w = head[6] + (head[7] << 8); h = head[8] + (head[9] << 8); }
+    else if (isPng && allowPng) {
+      const p = await pngInfo(file);
+      w = p.w; h = p.h; mime = 'image/png'; format = p.frames > 1 ? 'APNG' : 'PNG';
+    } else throw Error(allowPng ? I('This is not a GIF or PNG file.', 'Это не GIF и не PNG.', 'Це не GIF і не PNG.')
+                                : I('This is not a GIF file.', 'Это не GIF-файл.', 'Це не GIF-файл.'));
     if (h < 1 || (width && w !== width)) throw Error(I(`Size ${w}×${h}; this slot needs width ${width} px.`, `Размер ${w}×${h}; для этого места нужна ширина ${width} px.`, `Розмір ${w}×${h}; для цього місця потрібна ширина ${width} px.`));
-    // Long Steam artwork trick: last byte 0x3B (GIF trailer) -> 0x21. Applied to a copy only.
-    const last = new Uint8Array(await file.slice(-1).arrayBuffer())[0];
     let out = file, patched = false;
-    if (last === 0x3B) {
-      out = new File([file.slice(0, -1), new Uint8Array([0x21])], file.name, {type: 'image/gif'});
-      patched = true;
+    if (mime === 'image/gif') {
+      // Long Steam artwork trick: last byte 0x3B (GIF trailer) -> 0x21. Applied to a copy only.
+      const last = new Uint8Array(await file.slice(-1).arrayBuffer())[0];
+      if (last === 0x3B) {
+        out = new File([file.slice(0, -1), new Uint8Array([0x21])], file.name, {type: mime});
+        patched = true;
+      }
+    } else {
+      const tail = new Uint8Array(await file.slice(-IEND_LONG.length).arrayBuffer());
+      if (endsWith(tail, IEND_LONG)) patched = true;                    // already prepared
+      else if (endsWith(tail, IEND_STD)) {
+        out = new File([file.slice(0, -IEND_STD.length), new Uint8Array(IEND_LONG)], file.name, {type: mime});
+        patched = true;
+      } else throw Error(I('The PNG file has no proper ending (IEND); it is damaged.', 'У PNG-файла нет правильного конца (IEND); он повреждён.', 'PNG-файл не має правильного кінця (IEND); він пошкоджений.'));
     }
-    return {file: out, meta: {name: file.name, size: file.size, width: w, height: h, patched}};
+    if (out === file && file.type !== mime) out = new File([file], file.name, {type: mime});   // e.g. ".apng" without a type
+    return {file: out, meta: {name: file.name, size: file.size, width: w, height: h, patched, mime, format}};
   }
   const partDef = key => Object.values(LAYOUTS).flatMap(l => l.parts).find(p => p.key === key);
   async function setPart(key, file) {
@@ -216,7 +255,7 @@
     previews[key] = file ? URL.createObjectURL(file) : '';
     files[key] = null; info[key] = null; errs[key] = '';
     if (!file) return;
-    try { const r = await checkGif(file, partDef(key).width); files[key] = r.file; info[key] = r.meta; }
+    try { const r = await checkGif(file, partDef(key).width, !!partDef(key).png); files[key] = r.file; info[key] = r.meta; }
     catch (e) { errs[key] = e.message; info[key] = {name: file.name}; }
   }
   async function onPick(key, file) { await setPart(key, file); message = ''; render(); }
@@ -441,6 +480,11 @@
     } catch (e) { halt(I('Showcase list: ', 'Список витрин: ', 'Список вітрин: ') + e.message); }
     finally { working = false; }
   }
+  function uploadOnlyNow() {                      // 1.16: 1P - "just upload, not into a showcase"
+    const j = state(); if (!j || j.layout !== 'single') return;
+    if (allUploaded(j)) { store({...j, uploadOnly: true, target: null, phase: 'done', finishedAt: Date.now()}); render(); return; }
+    store({...j, uploadOnly: true, target: null, oldSlots: [], phase: 'upload', cur: nextPart(j)}); goto(UPLOAD);
+  }
   function chooseShowcase(key) {
     const j = state(); if (!j) return;
     const c = showcaseChoices.find(x => x.key === key); if (!c) return;
@@ -482,7 +526,7 @@
       const workshop = L(j).kind === 'workshop';
       if (workshop && !$('[name="consumer_app_id"]', form)) throw Error(I('Steam upload form has no Workshop field. Nothing was sent.', 'В форме Steam нет поля мастерской. Ничего не отправлено.', 'У формі Steam немає поля майстерні. Нічого не надіслано.'));
       const transfer = new DataTransfer();
-      transfer.items.add(f instanceof File ? f : new File([f], meta.name, {type: 'image/gif'}));
+      transfer.items.add(f instanceof File ? f : new File([f], meta.name, {type: meta.mime || 'image/gif'}));
       file.files = transfer.files;
       file.dispatchEvent(new Event('change', {bubbles: true}));
       title.value = TITLE; title.dispatchEvent(new Event('input', {bubbles: true}));
@@ -502,7 +546,7 @@
         w.value = '1000'; h.value = '1'; w.removeAttribute('id'); h.removeAttribute('id');
       }
       store({...j, phase: 'pending', submittedAt: Date.now()});
-      log('Submitting GIF', part.key, meta.name, workshop ? 'as Workshop item' : 'as artwork');
+      log('Submitting ' + (meta.format || 'GIF'), part.key, meta.name, workshop ? 'as Workshop item' : 'as artwork');
       HTMLFormElement.prototype.submit.call(form);
     } catch (e) { halt(I('Upload ', 'Загрузка ', 'Завантаження ') + (part?.short || '?') + ': ' + e.message); }
     finally { working = false; }
@@ -513,6 +557,7 @@
     const next = {...j, ids: {...(j.ids || {}), [key]: id}};
     const n = nextPart(next);
     if (n >= 0) { store({...next, phase: 'upload', cur: n}); goto(UPLOAD); }
+    else if (next.uploadOnly) { store({...next, phase: 'done', finishedAt: Date.now()}); render(); }   // 1.16: no showcase
     else { store({...next, phase: 'apply'}); goto(EDIT); }
   }
 
@@ -734,6 +779,7 @@
       log('Cleanup groups', {replaced: groups.replaced.flat().length, showcases: groups.showcases.length, free: groups.free.length});
       render();
       hydrateThumbs([...groups.byId.values()].filter(x => !x.good).map(x => x.id));
+      refineSets(groups.free.flat()).catch(e => log('sets', e.message));   // 1.16: no async wait - groups refine later
     } catch (e) { halt(I('Gallery: ', 'Галерея: ', 'Галерея: ') + e.message); }
     finally { working = false; }
   }
@@ -841,7 +887,7 @@
   }
 
   // ---------- Start / stop ----------
-  async function start() {
+  async function start(uploadOnly = false) {   // 1.16: uploadOnly - 1P only uploaded to the artwork, no showcase
     if (working) return;
     const parts = LAYOUTS[layout].parts;
     if (!owner()) return report(I('Sign in to Steam Community first.', 'Сначала войди в Steam Community.', 'Спершу увійди в Steam Community.'), true);
@@ -853,9 +899,10 @@
       await wipeFiles().catch(() => {});
       const meta = {};
       for (const part of parts) { await writeFile(part.key, files[part.key]); meta[part.key] = info[part.key]; }
-      const j = {version: 4, layout, phase: 'pick-showcase', steamID: owner(), created: Date.now(),
-        meta, ids: {}, cur: 0, target: null, oldSlots: [], thumbs: {}};
-      store(j); goto(EDIT);
+      const only = !!uploadOnly && layout === 'single';
+      const j = {version: 4, layout, phase: only ? 'upload' : 'pick-showcase', steamID: owner(), created: Date.now(),
+        meta, ids: {}, cur: 0, target: null, oldSlots: [], thumbs: {}, uploadOnly: only};
+      store(j); goto(only ? UPLOAD : EDIT);
     } catch (e) { report(e.message, true); }
     finally { working = false; }
   }
@@ -901,12 +948,12 @@
   function thumbBox(url, cls = '', id = '') {
     const real = id && thumbCache[id];
     const src = real ? sized(real) : url;
-    return `<span class="ssr-thumb ${cls}"><img ${src ? `src="${safe(src)}"` : ''} ${real ? `data-orig="${safe(real)}"` : ''} ${id ? `data-tid="${safe(id)}"` : ''} alt=""></span>`;
+    return `<span class="ssr-thumb ${cls}"><img loading="lazy" ${src ? `src="${safe(src)}"` : ''} ${real ? `data-orig="${safe(real)}"` : ''} ${id ? `data-tid="${safe(id)}"` : ''} alt=""></span>`;
   }
   function fileStatus(key) {
     const m = info[key];
     if (errs[key]) return `<span class="ssr-bad">✗ ${safe(errs[key])}</span>`;
-    if (m?.width) return `<span class="ssr-ok">✓ ${m.width}×${m.height}, ${mb(m.size)}</span>` +
+    if (m?.width) return `<span class="ssr-ok">✓ ${m.format && m.format !== 'GIF' ? m.format + ', ' : ''}${m.width}×${m.height}, ${mb(m.size)}</span>` +
       (m.size > SOFT_LIMIT ? `<br><span class="ssr-warn">${I('Over 5 MB: Steam sometimes rejects such files.', 'Больше 5 МБ: Steam иногда отклоняет такие файлы.', 'Понад 5 МБ: Steam іноді відхиляє такі файли.')}</span>` : '');
     return `<span class="ssr-muted">${I('not chosen', 'не выбран', 'не обрано')}</span>`;
   }
@@ -917,7 +964,7 @@
       <div class="ssr-file-info"><div class="ssr-file-label">${I(part.en, part.ru, part.uk)}</div>
         <div class="ssr-file-name">${safe(m?.name || '')}</div><div>${fileStatus(key)}</div>
         <button type="button" class="ssr-btn" data-pick-file="${key}">${m ? I('Change', 'Заменить', 'Замінити') : I('Choose file', 'Выбрать файл', 'Обрати файл')}</button>
-        <input type="file" id="ssr-in-${key}" accept=".gif,image/gif" hidden>
+        <input type="file" id="ssr-in-${key}" accept="${part.png ? '.gif,.png,.apng,image/gif,image/png,image/apng' : '.gif,image/gif'}" hidden>
       </div></div>`;
   }
   function stripsField() {
@@ -960,23 +1007,25 @@
         h += `<p>${I('Choose the two GIFs from your artwork set — the script uploads them and puts them into your Artwork Showcase. Nothing is deleted.',
                      'Выбери два GIF из комплекта — скрипт загрузит их и поставит в витрину иллюстраций. Ничего не удаляется.', 'Обери два GIF з комплекту — скрипт завантажить їх і поставить у вітрину ілюстрацій. Нічого не видаляється.')}</p>`;
         h += LAYOUTS.artwork.parts.map(fileField).join('');
-        h += `<button type="button" class="ssr-link ssr-mgr-link" id="ssr-art-open">${I('Manage my artwork (2P) →', 'Управление моими работами (2P) →', 'Керування моїми роботами (2P) →')}</button>`;
+        h += `<button type="button" class="ssr-link ssr-mgr-link" id="ssr-art-open">${I('Manage my artwork →', 'Управление моими работами →', 'Керування моїми роботами →')}</button>`;
       } else if (layout === 'single') {
         h += `<p>${I('Choose one GIF — the script uploads it to your artwork and puts it into your Featured Artwork Showcase (one large picture). Nothing is deleted.',
                      'Выбери один GIF — скрипт загрузит его в твои иллюстрации и поставит в витрину избранных иллюстраций (одна большая картинка). Ничего не удаляется.', 'Обери один GIF — скрипт завантажить його в твої ілюстрації й поставить у вітрину вибраних ілюстрацій (одна велика картинка). Нічого не видаляється.')}</p>`;
         h += LAYOUTS.single.parts.map(fileField).join('');
-        h += `<button type="button" class="ssr-link ssr-mgr-link" id="ssr-art-open">${I('Manage my artwork (1P) →', 'Управление моими работами (1P) →', 'Керування моїми роботами (1P) →')}</button>`;
+        h += `<button type="button" class="ssr-link ssr-mgr-link" id="ssr-art-open">${I('Manage my artwork →', 'Управление моими работами →', 'Керування моїми роботами →')}</button>`;
       } else {
         h += `<p>${I('Choose the five strips from your set — the script uploads them as Workshop items and puts them into a row of My Workshop Showcase. Nothing is deleted.',
                      'Выбери пять полос из комплекта — скрипт загрузит их как предметы мастерской и поставит в ряд витрины моей мастерской. Ничего не удаляется.', 'Обери п’ять смуг з комплекту — скрипт завантажить їх як предмети майстерні й поставить у ряд вітрини моєї майстерні. Нічого не видаляється.')}</p>`;
         h += stripsField();
-        h += `<button type="button" class="ssr-link ssr-mgr-link" id="ssr-mgr-open">${I('Manage my artwork (5P) →', 'Управление моими работами (5P) →', 'Керування моїми роботами (5P) →')}</button>`;
+        h += `<button type="button" class="ssr-link ssr-mgr-link" id="ssr-mgr-open">${I('Manage my artwork →', 'Управление моими работами →', 'Керування моїми роботами →')}</button>`;
       }
       const p = setProblem(); if (p) h += `<div class="ssr-note ssr-note-bad">${safe(p)}</div>`;
       const wn = setWarning(); if (wn) h += `<div class="ssr-note">${safe(wn)}</div>`;
       const ready = LAYOUTS[layout].parts.every(x => files[x.key]) && !p && owner();
       h += `<label class="ssr-check"><input type="checkbox" id="ssr-rights" ${rightsOK ? 'checked' : ''}> ${I('I have the right to publish these GIFs', 'У меня есть право публиковать эти GIF', 'Я маю право публікувати ці GIF')}</label>
         <button type="button" class="ssr-btn ssr-primary" id="ssr-start" ${ready && rightsOK ? '' : 'disabled'}>${I('Install to my showcase', 'Установить в витрину', 'Встановити у вітрину')}</button>`;
+      if (layout === 'single')
+        h += `<button type="button" class="ssr-btn" id="ssr-start-up" ${ready && rightsOK ? '' : 'disabled'}>${I('Just upload (not into a showcase)', 'Просто загрузить (не в витрину)', 'Просто завантажити (не у вітрину)')}</button>`;
     }
     if (step === 'pick-showcase') {
       if (showcaseChoices.length > 1) {
@@ -996,6 +1045,7 @@
             ${c.slots.some(okID) ? '' : `<small>${c.rows > 1 ? I('empty row', 'пустой ряд', 'порожній ряд') : I('empty', 'пустая', 'порожня')}</small>`}</span></label>`;
         }
         h += `</div><button type="button" class="ssr-btn ssr-primary" id="ssr-choose">${I('Put it here', 'Ставить сюда', 'Ставити сюди')}</button>`;
+        if (j.layout === 'single') h += `<button type="button" class="ssr-btn" id="ssr-uponly">${I('Just upload (not into a showcase)', 'Просто загрузить (не в витрину)', 'Просто завантажити (не у вітрину)')}</button>`;
       } else h += `<p>${I('Reading your showcases…', 'Читаю витрины профиля…', 'Читаю вітрини профілю…')}</p>`;
     }
     if (['upload', 'apply', 'verify-showcase'].includes(step) || (step === 'pending' && !pendingStuck))
@@ -1020,8 +1070,13 @@
         <ol class="ssr-ol"><li>${I(`On this page, add a showcase and choose <b>${showcaseName(j)}</b>.`, `На этой странице добавь витрину и выбери <b>${showcaseName(j)}</b>.`, `На цій сторінці додай вітрину й обери <b>${showcaseName(j)}</b>.`)}</li>
         <li>${I('Press the button below.', 'Нажми кнопку ниже.', 'Натисни кнопку нижче.')}</li></ol>
         <button type="button" class="ssr-btn ssr-primary" id="ssr-continue">${I('Done, continue', 'Добавил, продолжить', 'Додав, продовжити')}</button>`;
+      if (j.layout === 'single') h += `<button type="button" class="ssr-btn" id="ssr-uponly">${I('Leave it uploaded, no showcase', 'Оставить загруженным, без витрины', 'Залишити завантаженим, без вітрини')}</button>`;
     }
-    if (step === 'done') {
+    if (step === 'done' && j.uploadOnly)            // 1.16: 1P uploaded without a showcase
+      h += `<div class="ssr-success">✓ ${I('Uploaded!', 'Загружено!', 'Завантажено!')}</div>
+        <p>${I('The artwork is in your gallery, not in a showcase. Copy its link below.', 'Работа в твоей галерее, не в витрине. Ссылку можно скопировать ниже.', 'Робота у твоїй галереї, не у вітрині. Посилання можна скопіювати нижче.')}</p>
+        <button type="button" class="ssr-btn ssr-primary" id="ssr-finish">${I('Close', 'Закрыть', 'Закрити')}</button>`;
+    if (step === 'done' && !j.uploadOnly) {
       h += `<div class="ssr-success">✓ ${I('Your showcase is updated!', 'Витрина обновлена!', 'Вітрину оновлено!')}</div>
         <p>${I('If you still see the old picture, wait a few seconds and press Ctrl+F5.', 'Если видишь старую картинку — подожди пару секунд и нажми Ctrl+F5.', 'Якщо бачиш стару картинку — зачекай кілька секунд і натисни Ctrl+F5.')}</p>`;
       if (L(j).kind === 'artwork')
@@ -1039,31 +1094,44 @@
           const on = items.every(x => picks.has(x.id));
           // 2 artworks -> Artwork Showcase (2P); 1 artwork -> Featured Artwork Showcase (1P); other sizes get no button.
           const inst = items.length === 2 ? `<button type="button" class="ssr-btn ssr-inst" data-inst2="${ref}">${I('Install as 2P', 'Установить как 2P', 'Встановити як 2P')}</button>`
-            : items.length === 1 ? `<button type="button" class="ssr-btn ssr-inst" data-inst1="${ref}">${I('Install as 1P', 'Установить как 1P', 'Встановити як 1P')}</button>` : '';
-          return `<label class="ssr-set ${warn ? 'ssr-inuse' : ''} ${on ? 'on' : ''}"><span><input type="checkbox" data-gset="${ref}" ${on ? 'checked' : ''}> ${warn ? '⚠ ' : ''}${safe(label)}${inst}</span>
-            <span class="ssr-set-strips ssr-pairrow">${items.map(x => `<a href="${itemURL(x.id)}" target="_blank" rel="noopener" title="ID ${x.id}">${thumbBox(x.good ? x.thumb : '', 'ssr-setthumb', x.good ? '' : x.id)}</a>`).join('')}</span></label>`;
+            : items.length === 1 ? (narrow(items[0]) ? '' : `<button type="button" class="ssr-btn ssr-inst" data-inst1="${ref}">${I('Install as 1P', 'Установить как 1P', 'Встановити як 1P')}</button>`) +
+              `<button type="button" class="ssr-btn ssr-inst" data-copy1="${items[0].id}" title="${I('Copy link', 'Копировать ссылку', 'Копіювати посилання')}: ${itemURL(items[0].id)}">🔗</button>` : '';
+          return tile({box: `<input type="checkbox" data-gset="${ref}" ${on ? 'checked' : ''}>`, on, warn,
+            title: warn ? shortShowcase(label, items.length) : label, full: label, actions: inst,
+            imgs: `<span class="ssr-set-strips ssr-pairrow">${items.map(x => `<a href="${itemURL(x.id)}" target="_blank" rel="noopener" title="ID ${x.id}">${thumbBox(x.good ? x.thumb : '', 'ssr-setthumb', x.good ? '' : x.id)}</a>`).join('')}</span>`});
         };
-        const setName = items => items.length === 2 ? I('Set of 2 GIFs', 'Комплект из 2 GIF', 'Комплект із 2 GIF') : I(`${items.length} artwork(s)`, `Работ: ${items.length}`, `Робіт: ${items.length}`);
+        const setName = items => items.length === 2 ? I('Set of 2 GIFs', 'Комплект из 2 GIF', 'Комплект із 2 GIF')
+          : items.length === 1 ? (narrow(items[0]) ? I('Single strip', 'Одна полоса', 'Одна смуга') : I('Artwork 1P', 'Иллюстрация 1P', 'Ілюстрація 1P'))
+          : I(`${items.length} artwork(s)`, `Работ: ${items.length}`, `Робіт: ${items.length}`);
         const manage = j.mode === 'manage';
         const total = groups.byId.size;
         if (!total) h += `<p>${manage ? I('Your artwork gallery is empty.', 'Галерея работ пуста.', 'Галерея робіт порожня.') : I('Nothing to clean up — only the new artwork is in your gallery.', 'Чистить нечего — в галерее только новая работа.', 'Чистити нічого — у галереї тільки нова робота.')}</p>`;
-        if (groups.replaced.length)
-          h += `<div class="ssr-group"><div class="ssr-group-head"><b>${I('Replaced just now', 'Только что заменённые', 'Щойно замінені')}</b></div>
-            <small class="ssr-muted">${I('Were in this showcase before. Ticked.', 'Стояли в этой витрине до замены. Уже отмечены.', 'Стояли в цій вітрині до заміни. Уже позначені.')}</small>${setBox(groups.replaced[0], 'replaced:0', setName(groups.replaced[0]), false)}</div>`;
-        if (groups.showcases.length)
-          h += `<div class="ssr-group"><div class="ssr-group-head"><b>${I('In your showcases', 'Стоят в витринах', 'Стоять у вітринах')}</b></div>
-            <small class="ssr-muted">${I('Can be hidden or deleted too — the script warns you first; the showcase slots will then look empty to visitors.', 'Их тоже можно скрыть или удалить — скрипт сначала предупредит; места в витрине тогда опустеют для гостей.', 'Їх теж можна приховати або видалити — скрипт спершу попередить; місця у вітрині тоді спорожніють для гостей.')}</small>
-            ${groups.showcases.map((sc, i) => setBox(sc.items, `showcases:${i}`, sc.label, true)).join('')}</div>`;
-        if (groups.free.length)
-          h += `<div class="ssr-group"><div class="ssr-group-head"><b>${I('Not used anywhere', 'Нигде не используются', 'Ніде не використовуються')} (${groups.free.reduce((n, x) => n + x.length, 0)})</b>
-            <span><button type="button" class="ssr-link" id="ssr-g-all">${I('all', 'все', 'усі')}</button> · <button type="button" class="ssr-link" id="ssr-g-none">${I('none', 'снять', 'зняти')}</button></span></div>
-            <small class="ssr-muted">${I('Grouped into sets by upload order, newest first. Tick only what you recognise; click a picture to open it on Steam.', 'Сгруппированы в комплекты по порядку загрузки, новые сверху. Отмечай только то, что узнаёшь; нажми на картинку, чтобы открыть её в Steam.', 'Згруповані в комплекти за порядком завантаження, нові зверху. Познач тільки те, що впізнаєш; натисни на картинку, щоб відкрити її в Steam.')}</small>
-            ${groups.free.map((set, i) => setBox(set, `free:${i}`, setName(set), false)).join('')}</div>`;
-        if (total)
-          h += `<button type="button" class="ssr-btn ssr-primary" id="ssr-hide" ${picks.size ? '' : 'disabled'}>${I(`Hide ticked (${picks.size})`, `Скрыть отмеченные (${picks.size})`, `Приховати позначені (${picks.size})`)}</button>
-            <small class="ssr-muted">${I('Hidden artwork stays in Steam as "Only me" — reversible. Visitors no longer see the +N tile; you still see it on your own profile.', 'Скрытые работы остаются в Steam с видимостью «Только я» — это обратимо. Гости больше не видят плитку +N; ты на своём профиле её видишь.', 'Приховані роботи залишаються в Steam з видимістю «Тільки я» — це оборотно. Гості більше не бачать плитку +N; ти на своєму профілі її бачиш.')}</small>
-            <button type="button" class="ssr-link ssr-del-link" id="ssr-delete" ${picks.size ? '' : 'disabled'}>${I('or delete them permanently…', 'или удалить навсегда…', 'або видалити назавжди…')}</button>`;
-        h += `<button type="button" class="ssr-btn" id="ssr-finish">${manage ? I('Close', 'Закрыть', 'Закрити') : I('Leave everything as is', 'Ничего не менять, закрыть', 'Нічого не змінювати, закрити')}</button>`;
+        // 1.16: one grid of tiles with filters; the sections are kept as a tag on every tile
+        const all = [];
+        groups.replaced.forEach((set, i) => all.push({set, ref: `replaced:${i}`, label: setName(set), warn: false, sec: 'replaced'}));
+        groups.showcases.forEach((sc, i) => all.push({set: sc.items, ref: `showcases:${i}`, label: sc.label, warn: true, sec: 'used'}));
+        groups.free.forEach((set, i) => all.push({set, ref: `free:${i}`, label: setName(set), warn: false, sec: 'free'}));
+        const q = fq.replace(/\D/g, '');
+        const is1 = t => t.set.length === 1 && !narrow(t.set[0]);
+        const shown = all.filter(t => (fview === 'all' || (fview === '1p' && is1(t)) || (fview === '2p' && t.set.length === 2)
+            || (fview === 'used' && t.sec === 'used') || (fview === 'free' && t.sec !== 'used'))
+          && (!q || t.set.some(x => x.id.includes(q))));
+        const cnt = f => all.filter(f).length;
+        const fb = (key, label, n) => `<button type="button" class="ssr-fbtn ${fview === key ? 'active' : ''}" data-fview="${key}">${label} <small>${n}</small></button>`;
+        h += mgrTabs('art');
+        if (total) {
+          h += `<div class="ssr-fbar">${fb('all', I('All', 'Все', 'Усі'), all.length)}${fb('1p', '1P', cnt(is1))}${fb('2p', '2P', cnt(t => t.set.length === 2))}` +
+            `${fb('used', I('In showcases', 'В витринах', 'У вітринах'), cnt(t => t.sec === 'used'))}${fb('free', I('Not used', 'Не используются', 'Не використовуються'), cnt(t => t.sec !== 'used'))}` +
+            `<input type="search" id="ssr-fq" placeholder="${I('ID…', 'ID…', 'ID…')}" value="${safe(fq)}">` +
+            `<span class="ssr-fsel"><button type="button" class="ssr-link" id="ssr-v-all">${I('tick shown', 'отметить показанные', 'позначити показані')}</button> · <button type="button" class="ssr-link" id="ssr-g-none">${I('none', 'снять', 'зняти')}</button></span></div>`;
+          h += `<small class="ssr-muted">${I('Sets by upload order and proportions, newest first; ⚠ — stands in a showcase. Click a picture to open it on Steam.', 'Комплекты по порядку загрузки и пропорциям, новые сверху; ⚠ — стоит в витрине. Нажми на картинку, чтобы открыть её в Steam.', 'Комплекти за порядком завантаження й пропорціями, нові зверху; ⚠ — стоїть у вітрині. Натисни на картинку, щоб відкрити її в Steam.')}</small>`;
+          h += `<div class="ssr-grid">${shown.map(t => setBox(t.set, t.ref, t.label, t.warn)).join('') || `<p class="ssr-muted">${I('Nothing matches.', 'Ничего не найдено.', 'Нічого не знайдено.')}</p>`}</div>`;
+          h += `<div class="ssr-foot"><b>${I(`Ticked: ${picks.size}`, `Отмечено: ${picks.size}`, `Позначено: ${picks.size}`)}</b>
+            <button type="button" class="ssr-btn ssr-primary" id="ssr-hide" ${picks.size ? '' : 'disabled'}>${I(`Hide ticked (${picks.size})`, `Скрыть отмеченные (${picks.size})`, `Приховати позначені (${picks.size})`)}</button>
+            <button type="button" class="ssr-link ssr-del-link" id="ssr-delete" ${picks.size ? '' : 'disabled'}>${I('or delete them permanently…', 'или удалить навсегда…', 'або видалити назавжди…')}</button>
+            <span class="ssr-muted ssr-foot-note" title="${I('Hidden artwork stays in Steam as "Only me" — reversible.', 'Скрытые работы остаются в Steam с видимостью «Только я» — это обратимо.', 'Приховані роботи залишаються в Steam з видимістю «Тільки я» — це оборотно.')}">${I('Hiding is reversible ("Only me").', 'Скрытие обратимо («Только я»).', 'Приховування оборотне («Тільки я»).')}</span>
+            <button type="button" class="ssr-btn" id="ssr-finish">${manage ? I('Close', 'Закрыть', 'Закрити') : I('Leave everything as is', 'Ничего не менять, закрыть', 'Нічого не змінювати, закрити')}</button></div>`;
+        } else h += `<button type="button" class="ssr-btn" id="ssr-finish">${I('Close', 'Закрыть', 'Закрити')}</button>`;
       }
     }
     if (step === 'cleaned') {
@@ -1079,7 +1147,11 @@
         <button type="button" class="ssr-btn ssr-primary" id="ssr-retry">${I('Retry', 'Повторить', 'Повторити')}</button>`;
     }
     if (j && j.phase !== 'idle') {
-      if (idList(j).some(okID)) h += `<div class="ssr-ids">${L(j).parts.map((p, i) => `${safe(p.short)}: ${safe(idList(j)[i] || '—')}`).join(' · ')}</div>`;
+      if (idList(j).some(okID)) {
+        const one = L(j).parts.length === 1 && okID(idList(j)[0]);   // 1.16: 1P - a button with the link to the artwork
+        h += `<div class="ssr-ids">${L(j).parts.map((p, i) => `${safe(p.short)}: ${safe(idList(j)[i] || '—')}`).join(' · ')}` +
+          (one ? ` <button type="button" class="ssr-btn ssr-inst" data-copy1="${safe(idList(j)[0])}" title="${itemURL(idList(j)[0])}">${I('Copy link', 'Копировать ссылку', 'Копіювати посилання')}</button>` : '') + `</div>`;
+      }
       if (!['done', 'cleaned', 'cleanup'].includes(step))
         h += `<button type="button" class="ssr-link ssr-stop" id="ssr-stop">${I('Stop', 'Остановить', 'Зупинити')}</button>`;
     }
@@ -1090,6 +1162,8 @@
     const j = state();
     ui.classList.toggle('collapsed', !open);
     ui.classList.toggle('wide', !!mgr || j?.phase === 'cleanup' || j?.phase === 'pick-showcase');
+    // 1.16: the artwork review is a full-screen grid once the gallery is read (60+ works do not fit a narrow panel)
+    ui.classList.toggle('full', open && (!!mgr || (j?.phase === 'cleanup' && galleryLoaded && !!groups && groups.byId.size > 0)));
     ui.innerHTML = `<div class="ssr-top"><button type="button" class="ssr-head" id="ssr-toggle">▣ Showcase Refresher <span>${open ? '−' : '+'}</span></button>
       <div class="ssr-lang">${LANGS.map(([c, t]) => `<button type="button" data-lang="${c}" class="${language === c ? 'active' : ''}">${t}</button>`).join('')}</div></div>
       <div class="ssr-body">${body(j)}
@@ -1108,7 +1182,9 @@
     on('ssr-pick-many', () => $('#ssr-in-many', ui)?.click());
     const many = $('#ssr-in-many', ui); if (many) many.onchange = e => onPickMany(e.target.files || []);
     const r = $('#ssr-rights', ui); if (r) r.onchange = () => { rightsOK = r.checked; render(); };
-    on('ssr-start', start);
+    on('ssr-start', () => start(false));
+    on('ssr-start-up', () => start(true));
+    on('ssr-uponly', uploadOnlyNow);
     $$('input[name="ssr-sc"]', ui).forEach(x => x.onchange = () => { chosenKey = x.value; render(); });
     on('ssr-choose', () => chooseShowcase(chosenKey));
     on('ssr-find', () => { const j2 = state(); if (!j2) return; pendingStuck = false; store({...j2, phase: 'recover'}); goto(listURL(j2)); });
@@ -1124,12 +1200,28 @@
     const gsetItems = ref => { const [k, i] = ref.split(':'); const g = groups?.[k]?.[+i]; return Array.isArray(g) ? g : g?.items || []; };
     $$('[data-gset]', ui).forEach(el => el.onchange = () => { gsetItems(el.dataset.gset).forEach(x => el.checked ? picks.add(x.id) : picks.delete(x.id)); render(); });
     $$('[data-inst1]', ui).forEach(b => b.onclick = e => { e.preventDefault(); e.stopPropagation(); const items = gsetItems(b.dataset.inst1); if (items.length === 1) installExisting('single', [items[0].id]); });
+    $$('[data-copy1]', ui).forEach(b => b.onclick = async e => {   // 1.16: link to the artwork page
+      e.preventDefault(); e.stopPropagation();
+      const url = itemURL(b.dataset.copy1);
+      if (!b.dataset.t0) b.dataset.t0 = b.textContent;
+      let ok = false;
+      try { await navigator.clipboard.writeText(url); ok = true; } catch {
+        const ta = document.createElement('textarea'); ta.value = url; document.body.append(ta); ta.select();
+        try { ok = document.execCommand('copy'); } catch {} ta.remove();
+      }
+      b.textContent = ok ? (b.dataset.t0 === '🔗' ? '✓' : I('Copied ✓', 'Скопировано ✓', 'Скопійовано ✓')) : url;
+      setTimeout(() => { if (b.isConnected) b.textContent = b.dataset.t0; }, 1800);
+    });
     $$('[data-inst2]', ui).forEach(b => b.onclick = e => { e.preventDefault(); e.stopPropagation(); const items = gsetItems(b.dataset.inst2); if (items.length === 2) installPair(items); });
     on('ssr-g-all', () => { (groups?.free || []).flat().forEach(x => picks.add(x.id)); render(); });
+    $$('[data-fview]', ui).forEach(b => b.onclick = e => { e.preventDefault(); fview = b.dataset.fview; render(); });   // 1.16
+    on('ssr-v-all', () => { $$('[data-gset]', ui).forEach(el => gsetItems(el.dataset.gset).forEach(x => picks.add(x.id))); render(); });
+    const fqi = $('#ssr-fq', ui);
+    if (fqi) fqi.oninput = () => { fq = fqi.value; const pos = fqi.selectionStart; render(); const n = $('#ssr-fq', ui); if (n) { n.focus(); try { n.setSelectionRange(pos, pos); } catch {} } };
     on('ssr-g-none', () => { picks.clear(); render(); });
-    on('ssr-art-open', () => { if (!owner()) return report(I('Sign in to Steam Community first.', 'Сначала войди в Steam Community.', 'Спершу увійди в Steam Community.'), true);
-      store({version: 4, layout: 'artwork', mode: 'manage', phase: 'cleanup', steamID: owner(), created: Date.now(), ids: {}, oldSlots: [], thumbs: {}});
-      galleryLoaded = false; groups = null; picks.clear(); open = true; if (isGallery()) cleanupScan(); else goto(GALLERY); });
+    on('ssr-art-open', openArtManager);
+    on('ssr-tab-ws', () => openManager());                        // 1.16: one full-screen manager, two tabs
+    on('ssr-tab-art', () => { const jj = state(); mgr = null; if (jj?.phase === 'cleanup' && groups) render(); else openArtManager(); });
     $$('img[data-tid]', ui).forEach(im => im.addEventListener('error', () => { if (im.dataset.orig && im.src !== im.dataset.orig) im.src = im.dataset.orig; }));
   }
 
@@ -1138,7 +1230,7 @@
   // "My Workshop items" lists, so the list is read from the same popup the showcase editor uses,
   // and deletion uses the same form Steam shows on each item's own page.
   const POPUP = 'https://steamcommunity.com/my/publishedfilebrowsepopup/myworkshopitemsforshowcase/';
-  const DELETE_PAUSE = 500;  // ms between two deletions
+  const DELETE_PAUSE = 1500; // ms between two deletions (1.16: +1 s - Steam refuses many quick actions)
   const SET_GAP = 20000;   // IDs uploaded one after another are close; a bigger jump starts a new set
   let mgr = null;          // manager state while the manager view is open
 
@@ -1222,15 +1314,44 @@
     return {used, showcases};
   }
   // Group free items into sets: consecutive uploads with close IDs, at most five per set.
+  // 1.16: artwork proportions (width / height) by item ID. A 2P set is one wide GIF (Main, 506 px) and one narrow
+  // GIF (Side, 100 px); two wide ones uploaded one after another (two 1P, or two Mains) are not a set.
+  const RATIO = {};
+  const NARROW = 0.3;
+  const narrow = x => !!RATIO[x.id] && RATIO[x.id] < NARROW;   // a lone Side strip: no "Install as 1P"
+  function pairOK(a, b) {
+    const ra = RATIO[a.id], rb = RATIO[b.id];
+    if (!ra || !rb) return true;                    // proportions unknown yet - by upload order, as before
+    return (ra < NARROW) !== (rb < NARROW);
+  }
   function makeSets(items, max = 5) {
     const sorted = [...items].sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
     const runs = [];
     for (const it of sorted) {
       const run = runs[runs.length - 1];
-      if (run && run.length < max && BigInt(it.id) - BigInt(run[run.length - 1].id) < BigInt(SET_GAP)) run.push(it);
+      if (run && run.length < max && BigInt(it.id) - BigInt(run[run.length - 1].id) < BigInt(SET_GAP)
+          && (max !== 2 || pairOK(run[0], it))) run.push(it);
       else runs.push([it]);
     }
     return runs.reverse();  // newest first
+  }
+  // Loads the proportions of the free artwork, then regroups the sets (the first render groups by upload order only).
+  async function refineSets(items) {
+    const todo = items.filter(x => !RATIO[x.id]);
+    for (let i = 0; i < todo.length; i += 4) {
+      await Promise.all(todo.slice(i, i + 4).map(async x => {
+        const u = thumbCache[x.id] || x.thumb || '';
+        const r = await imageRatio(u ? sized(u) : '');
+        if (r) RATIO[x.id] = r;
+      }));
+    }
+    if (!groups || state()?.phase !== 'cleanup') return;
+    const before = JSON.stringify(groups.free.map(s => s.map(x => x.id)));
+    groups = {...groups, free: makeSets(groups.free.flat(), 2)};
+    if (JSON.stringify(groups.free.map(s => s.map(x => x.id))) !== before) {
+      log('Cleanup sets regrouped by proportions', groups.free.map(s => s.map(x => `${x.id}:${(RATIO[x.id] || 0).toFixed(2)}`)));
+      render();
+    }
   }
   async function openManager() {
     mgr = {loading: true, picks: new Set(), note: ''};
@@ -1257,9 +1378,29 @@
   // from the item's page (Referer). So: 1) a background request with that Referer; 2) if the item is still there,
   // the same form is submitted from a hidden copy of the item page. Each step is checked by re-reading the page.
   const itemExists = html => /id=["']?PublishedFileDelete|editrequireddlc\//.test(html);
+  // 1.16-dev2: Steam answers HTTP 429 (too many requests) to quick page reads - live 01.11.2026 every delete failed so.
+  // Each read / request is repeated after Steam's Retry-After (else 15, 30, 60 s); the wait is shown in the panel.
+  const steamWaits = [15000, 30000, 60000];
+  async function steamFetch(url, opts, what) {
+    for (let k = 0; ; k++) {
+      const r = await fetch(url, {credentials: 'include', ...opts});
+      if (r.status !== 429 && r.status !== 503) return r;
+      if (k >= steamWaits.length) throw Error(I(`Steam keeps refusing (${what}, HTTP ${r.status}) - try again in a few minutes`,
+        `Steam продолжает отказывать (${what}, HTTP ${r.status}) — попробуй через несколько минут`, `Steam продовжує відмовляти (${what}, HTTP ${r.status}) — спробуй за кілька хвилин`));
+      const ra = parseInt(r.headers.get('Retry-After') || '', 10);
+      const ms = Number.isFinite(ra) && ra > 0 ? Math.min(120, ra) * 1000 : steamWaits[k];
+      log('Steam', r.status, what, 'waiting', ms / 1000, 's');
+      if (mgr?.busy) { mgr.busy.wait = Math.round(ms / 1000); render(); }
+      await sleep(ms);
+      if (mgr?.busy) { mgr.busy.wait = 0; render(); }
+    }
+  }
   async function itemPage(id) {
-    const r = await fetch(itemURL(id) + '&ssr=' + Date.now(), {credentials: 'include'});
-    return r.ok ? await r.text() : '';
+    const r = await steamFetch(itemURL(id) + '&ssr=' + Date.now(), {}, I('item page', 'страница предмета', 'сторінка предмета'));
+    // 1.16-dev3: the page of a just deleted item answers HTTP 500 (live 01.11.2026; 404 / 410 likewise) - the item is gone
+    if ([404, 410, 500].includes(r.status)) { log('item page', id, 'HTTP', r.status, '- gone'); return ''; }
+    if (!r.ok) throw Error(I(`item page HTTP ${r.status}`, `страница предмета: HTTP ${r.status}`, `сторінка предмета: HTTP ${r.status}`));
+    return await r.text();
   }
   function deleteFields(id, html, session) {
     const appid = (html.match(/["']?(?:consumer_appid|creator_appid|consumer_app_id)["']?\s*[:=]\s*["']?(\d{2,10})/i) || [])[1] || String(WORKSHOP_APP);
@@ -1291,17 +1432,20 @@
     });
   }
   async function deleteWorkshopItem(id) {
-    const html = await itemPage(id);
-    if (!itemExists(html)) throw Error(I('not your item, or already deleted', 'не твой предмет или уже удалён', 'не твій предмет або вже видалений'));
-    const fields = deleteFields(id, html);
+    // 1.16-dev2: no read of the item page before the request (one request less per item - Steam rate-limits reads);
+    // the fields are those Steam's own Delete button sends (appid 480 of our uploads, the session of this page)
+    const fields = deleteFields(id, '');
     if (!fields.sessionid) throw Error(I('no Steam session id on this page', 'на странице нет идентификатора сессии Steam', 'на сторінці немає ідентифікатора сесії Steam'));
-    const r = await fetch('https://steamcommunity.com/sharedfiles/delete', {method: 'POST', credentials: 'include',
+    const r = await steamFetch('https://steamcommunity.com/sharedfiles/delete', {method: 'POST',
       headers: {'Content-Type': 'application/x-www-form-urlencoded'},   // exactly as the form sends it, no charset
-      body: new URLSearchParams(fields).toString(), referrer: itemURL(id), referrerPolicy: 'unsafe-url'});
+      body: new URLSearchParams(fields).toString(), referrer: itemURL(id), referrerPolicy: 'unsafe-url'}, I('delete', 'удаление', 'видалення'));
     log('delete request', id, fields.appid, r.status);
-    if (!itemExists(await itemPage(id))) return;
+    await sleep(1500);
+    const html = await itemPage(id);
+    if (!itemExists(html)) return;
     log('delete: item still there, submitting the form from the item page', id);
-    await deleteViaFrame(id, fields);
+    await deleteViaFrame(id, deleteFields(id, html));
+    await sleep(1500);
     if (itemExists(await itemPage(id))) throw Error(I('Steam did not delete it', 'Steam не удалил его', 'Steam не видалив його'));
   }
   async function deletePicked() {
@@ -1332,6 +1476,25 @@
     render();
   }
   // Workshop items: only sets of 5 -> My Workshop Showcase (5P); other sizes get no button.
+  // 1.16: short showcase name for tiles ("2P №1 · row 2"); the full Steam name goes to the tooltip
+  function shortShowcase(label, n) {
+    const t = String(label || '');
+    const pos = [...t.matchAll(/№\s*(\d+)/g)].pop()?.[1] || '';
+    const row = t.match(/(?:ряд|рядок|row)\s*(\d+)/i)?.[1] || '';
+    const kind = n === 5 ? '5P' : n === 2 ? '2P' : n === 1 ? '1P' : `${n}×`;
+    return `${kind}${pos ? ' №' + pos : ''}${row ? ' · ' + I('row ', 'ряд ', 'ряд ') + row : ''}`;
+  }
+  // One tile of the full-screen manager: tick + one-line title, a row of actions, pictures aligned at the top.
+  function tile({box, on, warn, title, full, actions, imgs}) {
+    return `<label class="ssr-set ssr-tile ${warn ? 'ssr-inuse' : ''} ${on ? 'on' : ''}" title="${safe(full || title)}">
+      <span class="ssr-th">${box}<span class="ssr-tt">${warn ? '⚠ ' : ''}${safe(title)}</span></span>
+      <span class="ssr-ta">${actions || ''}</span>${imgs}</label>`;
+  }
+  // Tabs of the full-screen manager: artwork (1P / 2P, gallery page) and Workshop items (5P).
+  function mgrTabs(cur) {
+    return `<div class="ssr-mtabs"><button type="button" class="${cur === 'art' ? 'active' : ''}" id="ssr-tab-art">${I('Artwork 1P / 2P', 'Иллюстрации 1P / 2P', 'Ілюстрації 1P / 2P')}</button>` +
+      `<button type="button" class="${cur === 'ws' ? 'active' : ''}" id="ssr-tab-ws">${I('Workshop 5P', 'Мастерская 5P', 'Майстерня 5P')}</button></div>`;
+  }
   function instButton(ids) {
     if (ids.length === 5) return `<button type="button" class="ssr-btn ssr-inst" data-inst="workshop" data-ids="${ids.join(',')}">${I('Install as 5P', 'Установить как 5P', 'Встановити як 5P')}</button>`;
     return '';
@@ -1339,45 +1502,55 @@
   function stripRow(ids, cls = '') {
     return `<span class="ssr-set-strips ${cls}">${ids.map(id => `<a href="${itemURL(id)}" target="_blank" rel="noopener" title="ID ${id}">${thumbBox(mgr.byId?.get(id)?.thumb || '', 'ssr-setthumb', id)}</a>`).join('')}</span>`;
   }
+  function openArtManager() {
+    if (!owner()) return report(I('Sign in to Steam Community first.', 'Сначала войди в Steam Community.', 'Спершу увійди в Steam Community.'), true);
+    mgr = null;
+    store({version: 4, layout: 'artwork', mode: 'manage', phase: 'cleanup', steamID: owner(), created: Date.now(), ids: {}, oldSlots: [], thumbs: {}});
+    galleryLoaded = false; groups = null; picks.clear(); open = true; if (isGallery()) cleanupScan(); else goto(GALLERY);
+  }
   function managerBody() {
-    let h = `<div class="ssr-mgr-head"><button type="button" class="ssr-link" id="ssr-mgr-back">← ${I('Back', 'Назад', 'Назад')}</button>
+    let h = mgrTabs('ws') + `<div class="ssr-mgr-head"><button type="button" class="ssr-link" id="ssr-mgr-back">← ${I('Back', 'Назад', 'Назад')}</button>
       <b>${I('My Workshop items', 'Мои предметы мастерской', 'Мої предмети майстерні')}</b>
       <button type="button" class="ssr-link" id="ssr-mgr-reload" ${mgr.loading || mgr.busy ? 'disabled' : ''}>${I('Refresh', 'Обновить', 'Оновити')}</button></div>`;
     if (mgr.note) h += `<div class="ssr-note" style="white-space:pre-line">${safe(mgr.note)}</div>`;
-    if (mgr.busy) return h + `<p>${I(`Deleting ${mgr.busy.done} of ${mgr.busy.total}… Keep this tab open.`, `Удаляю ${mgr.busy.done} из ${mgr.busy.total}… Не закрывай вкладку.`, `Видаляю ${mgr.busy.done} з ${mgr.busy.total}… Не закривай вкладку.`)}</p>`;
+    if (mgr.busy) return h + `<p>${I(`Deleting ${mgr.busy.done} of ${mgr.busy.total}… Keep this tab open.`, `Удаляю ${mgr.busy.done} из ${mgr.busy.total}… Не закрывай вкладку.`, `Видаляю ${mgr.busy.done} з ${mgr.busy.total}… Не закривай вкладку.`)}</p>` +
+      (mgr.busy.wait ? `<p class="ssr-muted">${I(`Steam asks to slow down — waiting ${mgr.busy.wait} s…`, `Steam просит не спешить — жду ${mgr.busy.wait} с…`, `Steam просить не поспішати — чекаю ${mgr.busy.wait} с…`)}</p>` : '');
     if (mgr.loading) return h + `<p>${I('Loading your Workshop items…', 'Загружаю твои предметы мастерской…', 'Завантажую твої предмети майстерні…')}</p>`;
     if (mgr.error) return h + `<div class="ssr-note ssr-note-bad">${safe(I('Could not load the list: ', 'Не удалось загрузить список: ', 'Не вдалося завантажити список: ') + mgr.error)}</div>`;
     if (!mgr.items.length) return h + `<p>${I('You have no Workshop items.', 'У тебя нет предметов мастерской.', 'У тебе немає предметів майстерні.')}</p>`;
-    if (mgr.showcases.length) {
-      h += `<div class="ssr-group"><div class="ssr-group-head"><b>${I('In your showcases', 'Стоят в витринах', 'Стоять у вітринах')}</b></div>
-        <small class="ssr-muted">${I('Can be deleted too — the showcase slots will then be empty.', 'Их тоже можно удалить — тогда места в витрине опустеют.', 'Їх теж можна видалити — тоді місця у вітрині спорожніють.')}</small>`;
-      mgr.showcases.forEach((sc, i) => {
-        const on = sc.ids.length && sc.ids.every(id => mgr.picks.has(id));
-        h += `<label class="ssr-set ssr-inuse ${on ? 'on' : ''}"><span><input type="checkbox" data-showcase="${i}" ${on ? 'checked' : ''}> ⚠ ${safe(sc.label)}${instButton(sc.ids)}</span>${stripRow(sc.ids)}</label>`;
-      });
-      h += `</div>`;
-    }
-    const otherUsed = mgr.items.filter(x => mgr.used[x.id] && !mgr.showcases.some(s => s.ids.includes(x.id)));
-    if (otherUsed.length)
-      h += `<div class="ssr-group"><small class="ssr-muted">🔒 ${I('Also used in other showcases:', 'Ещё используются в других витринах:', 'Ще використовуються в інших вітринах:')} ${otherUsed.length}</small></div>`;
-    h += `<div class="ssr-group"><div class="ssr-group-head"><b>${I('Not used anywhere', 'Нигде не используются', 'Ніде не використовуються')} (${mgr.sets.reduce((n, s) => n + s.length, 0)})</b>
-      ${mgr.sets.length ? `<span><button type="button" class="ssr-link" id="ssr-mgr-all">${I('all', 'все', 'усі')}</button> · <button type="button" class="ssr-link" id="ssr-mgr-none">${I('none', 'снять', 'зняти')}</button></span>` : ''}</div>`;
-    if (!mgr.sets.length) h += `<small class="ssr-muted">${I('Nothing to clean up.', 'Чистить нечего.', 'Чистити нічого.')}</small>`;
-    else h += `<small class="ssr-muted">${I('Grouped into sets by upload order, newest first. Click a set to tick it; click a picture to open it on Steam.',
-                                          'Сгруппированы в комплекты по порядку загрузки, новые сверху. Нажми на комплект, чтобы отметить его; на картинку — чтобы открыть её в Steam.', 'Згруповані в комплекти за порядком завантаження, нові зверху. Натисни на комплект, щоб позначити його; на картинку — щоб відкрити її в Steam.')}</small>`;
+    // 1.16: the same grid as the artwork manager
+    const tiles = [];
+    mgr.showcases.forEach((sc, i) => {
+      const on = sc.ids.length && sc.ids.every(id => mgr.picks.has(id));
+      tiles.push({used: true, html: tile({box: `<input type="checkbox" data-showcase="${i}" ${on ? 'checked' : ''}>`, on, warn: true,
+        title: shortShowcase(sc.label, sc.ids.length), full: sc.label, actions: instButton(sc.ids), imgs: stripRow(sc.ids)})});
+    });
     mgr.sets.forEach((set, i) => {
       const ids = set.map(x => x.id), on = ids.every(id => mgr.picks.has(id));
-      h += `<label class="ssr-set ${on ? 'on' : ''}"><span><input type="checkbox" data-set="${i}" ${on ? 'checked' : ''}>
-        ${set.length === 5 ? I('Set of 5 strips', 'Комплект из 5 полос', 'Комплект із 5 смуг') : I(`${set.length} item(s)`, `Предметов: ${set.length}`, `Предметів: ${set.length}`)}${instButton(ids)}</span>${stripRow(ids)}</label>`;
+      tiles.push({used: false, html: tile({box: `<input type="checkbox" data-set="${i}" ${on ? 'checked' : ''}>`, on, warn: false,
+        title: set.length === 5 ? I('Set of 5 strips', 'Комплект из 5 полос', 'Комплект із 5 смуг') : I(`${set.length} item(s)`, `Предметов: ${set.length}`, `Предметів: ${set.length}`),
+        actions: instButton(ids), imgs: stripRow(ids)})});
     });
-    h += `</div>`;
+    const wv = ['all', 'used', 'free'].includes(fview) ? fview : 'all';
+    const fb = (key, label, n) => `<button type="button" class="ssr-fbtn ${wv === key ? 'active' : ''}" data-fview="${key}">${label} <small>${n}</small></button>`;
+    h += `<div class="ssr-fbar">${fb('all', I('All', 'Все', 'Усі'), tiles.length)}${fb('used', I('In showcases', 'В витринах', 'У вітринах'), tiles.filter(t => t.used).length)}` +
+      `${fb('free', I('Not used', 'Не используются', 'Не використовуються'), tiles.filter(t => !t.used).length)}` +
+      `<span class="ssr-fsel">${mgr.sets.length ? `<button type="button" class="ssr-link" id="ssr-mgr-all">${I('tick not used', 'отметить неиспользуемые', 'позначити невикористані')}</button> · ` : ''}<button type="button" class="ssr-link" id="ssr-mgr-none">${I('none', 'снять', 'зняти')}</button></span></div>`;
+    const otherUsed = mgr.items.filter(x => mgr.used[x.id] && !mgr.showcases.some(s => s.ids.includes(x.id)));
+    h += `<small class="ssr-muted">${I('Sets of 5 strips by upload order, newest first; ⚠ — stands in a showcase. Click a picture to open it on Steam.', 'Комплекты из 5 полос по порядку загрузки, новые сверху; ⚠ — стоит в витрине. Нажми на картинку, чтобы открыть её в Steam.', 'Комплекти з 5 смуг за порядком завантаження, нові зверху; ⚠ — стоїть у вітрині. Натисни на картинку, щоб відкрити її в Steam.')}` +
+      (otherUsed.length ? ` 🔒 ${I('Also used in other showcases:', 'Ещё используются в других витринах:', 'Ще використовуються в інших вітринах:')} ${otherUsed.length}` : '') + `</small>`;
+    const shown = tiles.filter(t => wv === 'all' || (wv === 'used' ? t.used : !t.used));
+    h += `<div class="ssr-grid ssr-grid-ws">${shown.map(t => t.html).join('') || `<p class="ssr-muted">${I('Nothing here.', 'Здесь ничего нет.', 'Тут нічого немає.')}</p>`}</div>`;
     const n = [...mgr.picks].length;
-    if (mgr.sets.length || mgr.showcases.length) h += `<button type="button" class="ssr-btn ssr-danger" id="ssr-mgr-delete" ${n ? '' : 'disabled'}>${I(`Delete ticked (${n})`, `Удалить отмеченные (${n})`, `Видалити позначені (${n})`)}</button>
-      <small class="ssr-muted">${I('Deleting cannot be undone. Keep your own copies of the GIFs.', 'Удаление необратимо. Храни у себя копии GIF.', 'Видалення незворотне. Зберігай у себе копії GIF.')}</small>`;
+    h += `<div class="ssr-foot"><b>${I(`Ticked: ${n}`, `Отмечено: ${n}`, `Позначено: ${n}`)}</b>
+      <button type="button" class="ssr-btn ssr-danger" id="ssr-mgr-delete" ${n ? '' : 'disabled'}>${I(`Delete ticked (${n})`, `Удалить отмеченные (${n})`, `Видалити позначені (${n})`)}</button>
+      <span class="ssr-muted ssr-foot-note">${I('Deleting cannot be undone. Keep your own copies of the GIFs.', 'Удаление необратимо. Храни у себя копии GIF.', 'Видалення незворотне. Зберігай у себе копії GIF.')}</span>
+      <button type="button" class="ssr-btn" id="ssr-mgr-close">${I('Close', 'Закрыть', 'Закрити')}</button></div>`;
     return h;
   }
   function bindManager(ui, on) {
     on('ssr-mgr-back', () => { mgr = null; render(); });
+    on('ssr-mgr-close', () => { mgr = null; const jj = state(); if (jj?.mode === 'manage' && jj.phase === 'cleanup') finish(); else render(); });
     on('ssr-mgr-reload', () => openManager());
     on('ssr-mgr-delete', deletePicked);
     $$('[data-inst]', ui).forEach(b => b.onclick = e => { e.preventDefault(); e.stopPropagation(); if (b.dataset.inst === 'workshop') installExisting('workshop', b.dataset.ids.split(',')); });
@@ -1431,6 +1604,32 @@
 #ssr-panel{position:fixed;bottom:16px;right:16px;z-index:2147483646;width:min(400px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto;
  background:#16202d;color:#dfe9f2;border:1px solid #3f5b72;border-radius:10px;box-shadow:0 10px 36px #000b;font:13px/1.45 "Motiva Sans",Arial,sans-serif}
 #ssr-panel.wide{width:min(470px,calc(100vw - 32px))}
+#ssr-panel.full{top:2vh;left:2vw;right:2vw;bottom:2vh;width:auto;max-height:none}
+#ssr-panel .ssr-fbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:4px 0}
+#ssr-panel .ssr-fbtn{padding:4px 10px;border:1px solid #3f5b72;border-radius:14px;background:#1c2b3b;color:#c7d5e0;cursor:pointer;font:12px Arial,sans-serif}
+#ssr-panel .ssr-fbtn.active{background:#3d7bb3;border-color:#66c0f4;color:#fff}
+#ssr-panel .ssr-fbtn small{opacity:.7}
+#ssr-panel #ssr-fq{width:130px;padding:4px 8px;border:1px solid #3f5b72;border-radius:5px;background:#0d141c;color:#fff;font:12px Arial,sans-serif}
+#ssr-panel .ssr-fsel{margin-left:auto}
+#ssr-panel .ssr-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:8px;margin:6px 0 4px}
+#ssr-panel.full .ssr-grid .ssr-set{padding:5px;gap:4px}
+#ssr-panel .ssr-grid .ssr-btn.ssr-inst{margin-left:0;padding:2px 6px;font-size:11px}
+#ssr-panel .ssr-grid .ssr-thumb.ssr-setthumb{height:150px}
+#ssr-panel .ssr-tile{justify-content:flex-start}
+#ssr-panel .ssr-tile > .ssr-th{display:flex;gap:6px;align-items:center;font-weight:600;font-size:12.5px;min-width:0}
+#ssr-panel .ssr-tile .ssr-tt{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;min-width:0}
+#ssr-panel .ssr-tile > .ssr-ta{display:flex;flex-wrap:nowrap;gap:4px;height:24px;align-items:center;overflow:hidden}
+#ssr-panel .ssr-tile .ssr-btn.ssr-inst{margin:0;padding:2px 7px;font-size:11px}
+#ssr-panel .ssr-tile > .ssr-set-strips{flex:0 0 150px;height:150px;align-items:flex-start;justify-content:center;margin-top:2px}
+#ssr-panel .ssr-grid-ws{grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}
+#ssr-panel .ssr-grid-ws .ssr-set-strips a{max-width:19%}
+#ssr-panel .ssr-mtabs{display:flex;gap:4px;margin:2px 0 6px}
+#ssr-panel .ssr-mtabs button{padding:6px 14px;border:1px solid #3f5b72;border-radius:6px 6px 0 0;background:#1c2b3b;color:#c7d5e0;cursor:pointer;font:600 13px Arial,sans-serif}
+#ssr-panel .ssr-mtabs button.active{background:#2a75bb;border-color:#66c0f4;color:#fff}
+#ssr-panel .ssr-foot{position:sticky;bottom:0;display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:8px 0;background:#16202d;border-top:1px solid #2a475e}
+#ssr-panel .ssr-foot .ssr-btn{width:auto}
+#ssr-panel .ssr-foot #ssr-finish,#ssr-panel .ssr-foot #ssr-mgr-close{margin-left:auto}
+#ssr-panel .ssr-foot-note{font-size:11px}
 #ssr-panel.collapsed{width:auto;max-width:260px}#ssr-panel.collapsed .ssr-body,#ssr-panel.collapsed .ssr-lang{display:none}
 #ssr-panel .ssr-top{display:flex;align-items:center;background:#1f3349;position:sticky;top:0;z-index:1}
 #ssr-panel .ssr-head{flex:1;background:none;border:0;color:#fff;font:700 13px Arial,sans-serif;text-align:left;padding:10px 12px;cursor:pointer}
@@ -1509,7 +1708,8 @@
 #ssr-panel .ssr-tile small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #ssr-panel .ssr-tile.ssr-big{flex-direction:row;align-items:center;gap:12px}
 #ssr-panel .ssr-tile.ssr-big .ssr-thumb{width:70px;height:110px}
-#ssr-panel .ssr-ids{font-size:11px;color:#8ea4b6}
+#ssr-panel .ssr-ids{font-size:11px;color:#8ea4b6;display:flex;align-items:center;gap:8px}
+#ssr-panel .ssr-ids .ssr-btn.ssr-inst{width:auto;margin:0 0 0 auto}
 #ssr-panel .ssr-ol{margin:0;padding-left:18px}
 #ssr-panel .ssr-footer{margin-top:4px;padding-top:8px;border-top:1px solid #2c4256;font-size:10.5px;color:#7d93a5}`;
     try { GM_addStyle(styles); } catch { const e = document.createElement('style'); e.textContent = styles; document.head.append(e); }
